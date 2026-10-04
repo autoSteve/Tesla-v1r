@@ -496,6 +496,191 @@ async def _fetch_with_retry(
     # All retries failed
     raise last_error or UpdateFailed("All retry attempts failed")
 
+
+class EnergyAccumulator:
+    """Accumulates daily energy totals from instantaneous power readings.
+
+    Integrates power (kW) over time to estimate daily energy (kWh).
+    Resets at local midnight. Persisted via HA Store to survive restarts.
+    """
+
+    def __init__(self, hass: HomeAssistant | None = None, store_key: str = "") -> None:
+        self._hass = hass
+        self._last_update: datetime | None = None
+        self._last_date: Any = None
+        self.solar_kwh: float = 0.0
+        self.grid_import_kwh: float = 0.0
+        self.grid_export_kwh: float = 0.0
+        self.battery_charge_kwh: float = 0.0
+        self.battery_discharge_kwh: float = 0.0
+        self.load_kwh: float = 0.0
+        self._store: Store | None = None
+        if hass and store_key:
+            self._store = Store(
+                hass,
+                ENERGY_ACC_STORE_VERSION,
+                f"tesla_v1r.energy_acc.{store_key}",
+            )
+
+    async def async_restore(self) -> None:
+        """Restore accumulated energy from persistent storage."""
+        if not self._store:
+            return
+        try:
+            data = await self._store.async_load()
+        except Exception as e:
+            _LOGGER.warning("Failed to load persisted energy accumulator: %s", e)
+            return
+        if not data:
+            return
+        stored_date = data.get("date")
+        now = dt_util.now()
+        today = now.strftime("%Y-%m-%d")
+        if stored_date == today:
+            self.solar_kwh = float(data.get("solar_kwh", 0.0))
+            self.grid_import_kwh = float(data.get("grid_import_kwh", 0.0))
+            self.grid_export_kwh = float(data.get("grid_export_kwh", 0.0))
+            self.battery_charge_kwh = float(data.get("battery_charge_kwh", 0.0))
+            self.battery_discharge_kwh = float(data.get("battery_discharge_kwh", 0.0))
+            self.load_kwh = float(data.get("load_kwh", 0.0))
+            _LOGGER.info(
+                "Restored energy accumulator: solar=%.2f grid_in=%.2f grid_out=%.2f "
+                "charge=%.2f discharge=%.2f load=%.2f kWh (date=%s)",
+                self.solar_kwh, self.grid_import_kwh, self.grid_export_kwh,
+                self.battery_charge_kwh, self.battery_discharge_kwh, self.load_kwh,
+                stored_date,
+            )
+            # A restored same-day snapshot is already associated with the
+            # current local day.  Keep that ownership marker so the first
+            # update after a reload does not treat the restored totals as
+            # stale and reset them.
+            self._last_date = now.date()
+        else:
+            _LOGGER.debug(
+                "Energy accumulator data from %s (today=%s), starting fresh",
+                stored_date, today,
+            )
+
+    async def async_flush(self) -> None:
+        """Immediately write current energy data to persistent storage.
+
+        Called during integration unload so the next restore gets the latest
+        values, preventing total_increasing sensors from going backwards.
+        """
+        if not self._store:
+            return
+        await self._store.async_save(self._data_to_save())
+
+    def _schedule_save(self) -> None:
+        """Schedule a coalesced write of energy data to persistent storage."""
+        if not self._store:
+            return
+        self._store.async_delay_save(
+            self._data_to_save,
+            ENERGY_ACC_SAVE_DELAY,
+        )
+
+    def _data_to_save(self) -> dict:
+        """Return energy data dict for Store serialization."""
+        now = dt_util.now()
+        # Delayed Store callbacks can run after local midnight.  Daily and
+        # MTD totals belong to the period of the last update, not necessarily
+        # the wall-clock time at which serialization happens.
+        stored_date = self._last_date or now.date()
+        stored_month = self._last_month or stored_date.strftime("%Y-%m")
+        return {
+            "date": stored_date.strftime("%Y-%m-%d"),
+            "solar_kwh": round(self.solar_kwh, 4),
+            "grid_import_kwh": round(self.grid_import_kwh, 4),
+            "grid_export_kwh": round(self.grid_export_kwh, 4),
+            "battery_charge_kwh": round(self.battery_charge_kwh, 4),
+            "battery_discharge_kwh": round(self.battery_discharge_kwh, 4),
+            "load_kwh": round(self.load_kwh, 4),
+            "month": stored_month,
+        }
+
+    def update(
+        self,
+        solar_kw: float,
+        grid_kw: float,
+        battery_kw: float,
+        load_kw: float | None,
+    ) -> None:
+        """Update accumulators with current power readings.
+
+        Sign conventions (standard PowerSync format):
+            solar_kw: always >= 0
+            grid_kw: positive = importing, negative = exporting
+            battery_kw: positive = discharging, negative = charging
+            load_kw: always >= 0
+
+        Optional cost tracking:
+            buy_price_per_kwh: current import price in $/kWh (None = skip cost tracking)
+            sell_price_per_kwh: current export/feed-in price in $/kWh (None = skip cost tracking)
+        """
+        now = dt_util.now()  # Local time for midnight reset
+
+        # Reset MTD at month rollover
+        current_month = now.strftime("%Y-%m")
+        if self._last_month is not None and current_month != self._last_month:
+            self.mtd_solar_kwh = 0.0
+            self.mtd_grid_import_kwh = 0.0
+            self.mtd_grid_export_kwh = 0.0
+            self.mtd_battery_charge_kwh = 0.0
+            self.mtd_battery_discharge_kwh = 0.0
+            self.mtd_load_kwh = 0.0
+
+        # Reset at local midnight
+        if self._last_date is not None and now.date() != self._last_date:
+            _LOGGER.info(
+                "Energy accumulator midnight reset: solar=%.2f grid_in=%.2f grid_out=%.2f "
+                "charge=%.2f discharge=%.2f load=%.2f kWh",
+                self.solar_kwh, self.grid_import_kwh, self.grid_export_kwh,
+                self.battery_charge_kwh, self.battery_discharge_kwh, self.load_kwh,
+            )
+            self.solar_kwh = 0.0
+            self.grid_import_kwh = 0.0
+            self.grid_export_kwh = 0.0
+            self.battery_charge_kwh = 0.0
+            self.battery_discharge_kwh = 0.0
+            self.load_kwh = 0.0
+
+        # Integrate power × time
+        if self._last_update is not None:
+            delta_h = (now - self._last_update).total_seconds() / 3600
+            if 0 < delta_h < 0.1:  # Sanity: skip if > 6 min gap (stale/restart)
+                self.solar_kwh += max(0, solar_kw) * delta_h
+                self.grid_import_kwh += max(0, grid_kw) * delta_h
+                self.grid_export_kwh += max(0, -grid_kw) * delta_h
+                self.battery_charge_kwh += max(0, -battery_kw) * delta_h
+                self.battery_discharge_kwh += max(0, battery_kw) * delta_h
+                if load_kw is not None:
+                    self.load_kwh += max(0, load_kw) * delta_h
+                # MTD accumulation
+                self.mtd_solar_kwh += max(0, solar_kw) * delta_h
+                self.mtd_grid_import_kwh += max(0, grid_kw) * delta_h
+                self.mtd_grid_export_kwh += max(0, -grid_kw) * delta_h
+                self.mtd_battery_charge_kwh += max(0, -battery_kw) * delta_h
+                self.mtd_battery_discharge_kwh += max(0, battery_kw) * delta_h
+                if load_kw is not None:
+                    self.mtd_load_kwh += max(0, load_kw) * delta_h
+                self._schedule_save()
+
+        self._last_update = now
+        self._last_date = now.date()
+        self._last_month = current_month
+
+    def as_dict(self) -> dict:
+        """Return accumulated totals as a dict for energy_summary."""
+        return {
+            "pv_today_kwh": round(self.solar_kwh, 3),
+            "grid_import_today_kwh": round(self.grid_import_kwh, 3),
+            "grid_export_today_kwh": round(self.grid_export_kwh, 3),
+            "charge_today_kwh": round(self.battery_charge_kwh, 3),
+            "discharge_today_kwh": round(self.battery_discharge_kwh, 3),
+            "load_today_kwh": round(self.load_kwh, 3),
+        }
+
 class TeslaEnergyCoordinator(DataUpdateCoordinator):
     """Coordinator to fetch Tesla energy data from Tesla API (Fleet API)."""
 
@@ -536,6 +721,7 @@ class TeslaEnergyCoordinator(DataUpdateCoordinator):
         self._site_info_fetch_failed = (
             False  # Negative cache to avoid retrying on every sync cycle
         )
+        self._energy_acc = EnergyAccumulator(hass, "tesla")
         self._firmware = None  # Extracted from site_info gateways
         self._last_valid_battery_level_pct: float | None = None
 
@@ -573,7 +759,7 @@ class TeslaEnergyCoordinator(DataUpdateCoordinator):
         self._lifetime_totals_store = Store(
             hass,
             LIFETIME_TOTALS_STORE_VERSION,
-            f"power_sync.lifetime_totals.{entry_id or site_id}",
+            f"tesla_v1r.lifetime_totals.{entry_id or site_id}",
         )
 
         # Determine API base URL based on provider
