@@ -391,6 +391,15 @@ SENSOR_TYPE_OPTIMIZATION_FORCE_DISCHARGE_WINDOWS = (
     "optimization_force_discharge_windows"
 )
 
+# Attributes
+ATTR_LAST_SYNC = "last_sync"
+ATTR_SYNC_STATUS = "sync_status"
+ATTR_PRICE_SPIKE = "price_spike"
+ATTR_WHOLESALE_PRICE = "wholesale_price"
+ATTR_NETWORK_PRICE = "network_price"
+ATTR_AEMO_REGION = "aemo_region"
+ATTR_AEMO_THRESHOLD = "aemo_threshold"
+ATTR_SPIKE_START_TIME = "spike_start_time"
 
 # ============================================================
 # Device Family Grouping
