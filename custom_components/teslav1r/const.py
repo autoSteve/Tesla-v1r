@@ -202,6 +202,30 @@ SENSOR_TYPE_BATTERY_LEVEL = "battery_level"
 SENSOR_TYPE_BATTERY_MAX_CHARGE_POWER = "battery_max_charge_power"
 SENSOR_TYPE_BATTERY_MAX_DISCHARGE_POWER = "battery_max_discharge_power"
 
+SENSOR_TYPE_DAILY_SOLAR_ENERGY = "daily_solar_energy"
+SENSOR_TYPE_DAILY_GRID_IMPORT = "daily_grid_import"
+SENSOR_TYPE_DAILY_GRID_EXPORT = "daily_grid_export"
+SENSOR_TYPE_DAILY_BATTERY_CHARGE = "daily_battery_charge"
+SENSOR_TYPE_DAILY_BATTERY_DISCHARGE = "daily_battery_discharge"
+SENSOR_TYPE_DAILY_LOAD = "daily_load"
+SENSOR_TYPE_DAILY_IMPORT_COST = "daily_import_cost"
+SENSOR_TYPE_DAILY_EXPORT_EARNINGS = "daily_export_earnings"
+SENSOR_TYPE_DAILY_AVG_COST_PER_KWH = "daily_avg_cost_per_kwh"
+SENSOR_TYPE_MTD_AVG_COST_PER_KWH = "mtd_avg_cost_per_kwh"
+
+# Demand charge sensors
+SENSOR_TYPE_GRID_IMPORT_POWER = "grid_import_power"
+SENSOR_TYPE_IN_DEMAND_CHARGE_PERIOD = "in_demand_charge_period"
+SENSOR_TYPE_PEAK_DEMAND_THIS_CYCLE = "peak_demand_this_cycle"
+SENSOR_TYPE_DEMAND_CHARGE_COST = "demand_charge_cost"
+SENSOR_TYPE_DAYS_UNTIL_DEMAND_RESET = "days_until_demand_reset"
+
+# Supply charge sensors
+SENSOR_TYPE_DAILY_SUPPLY_CHARGE_COST = "daily_supply_charge_cost"
+SENSOR_TYPE_MONTHLY_SUPPLY_CHARGE = "monthly_supply_charge"
+SENSOR_TYPE_TOTAL_MONTHLY_COST = "total_monthly_cost"
+
+
 # Switch types
 SWITCH_TYPE_AUTO_SYNC = "auto_sync"
 SWITCH_TYPE_FORCE_DISCHARGE = "force_discharge"
