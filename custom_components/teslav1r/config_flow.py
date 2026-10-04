@@ -2,8 +2,11 @@
 
 import logging
 import re
+import secrets
 import sys
+import time
 from typing import Any
+from urllib.parse import parse_qs, urlencode, urlparse
 
 import aiohttp
 
@@ -45,11 +48,19 @@ from .const import (
     CONF_BATTERY_SENSOR_DISPLAY_MODE,
     # Battery system selection
     CONF_BATTERY_SYSTEM,
+    CONF_FLEET_API_ACCESS_TOKEN,
+    CONF_FLEET_API_BASE_URL,
+    CONF_FLEET_API_CLIENT_ID,
+    CONF_FLEET_API_CLIENT_SECRET,
+    CONF_FLEET_API_REFRESH_TOKEN,
+    CONF_FLEET_API_TOKEN_EXPIRES_AT,
     CONF_POWERWALL_LOCAL_IP,
     CONF_TESLA_API_PROVIDER,
     CONF_TESLA_ENERGY_SITE_ID,
     DOMAIN,
+    FLEET_API_AUTH_URL,
     FLEET_API_BASE_URL,
+    FLEET_API_TOKEN_URL,
     TESLA_PROVIDER_FLEET_API,
 )
 from .powerwall_host import normalize_powerwall_gateway_host
@@ -76,6 +87,11 @@ Marker = validator.Marker
 
 _LOGGER = logging.getLogger(__name__)
 
+_DEFAULT_OAUTH_REDIRECT_URI = "https://my.home-assistant.io/redirect/oauth"
+_FIELD_OAUTH_REDIRECT_URI = "oauth_redirect_uri"
+_FIELD_OAUTH_CALLBACK_INPUT = "oauth_callback_input"
+_ENERGY_ONLY_SCOPES = "openid offline_access energy_device_data energy_cmds"
+
 # Per-brand connection/detection keys. Only Tesla Retained
 BATTERY_SYSTEM_CONNECTION_KEYS: dict[str, tuple[str, ...]] = {
     BATTERY_SYSTEM_TESLA: (CONF_TESLA_ENERGY_SITE_ID,),
@@ -86,7 +102,7 @@ def _stored_wh_to_kwh(value: Any, default_wh: int) -> float:
     """Convert a stored Wh/kWh value to kWh for config flow display."""
     try:
         amount = float(value)
-    except TypeError, ValueError:
+    except (TypeError, ValueError):
         amount = float(default_wh)
     return amount / 1000.0 if amount >= 1000 else amount
 
@@ -95,7 +111,7 @@ def _stored_w_to_kw(value: Any, default_w: int) -> float:
     """Convert a stored W/kW value to kW for config flow display."""
     try:
         amount = float(value)
-    except TypeError, ValueError:
+    except (TypeError, ValueError):
         amount = float(default_w)
     return amount / 1000.0 if amount > 100 else amount
 
@@ -106,7 +122,7 @@ def _stored_optional_w_to_kw(value: Any) -> float | None:
         return None
     try:
         amount = float(value)
-    except TypeError, ValueError:
+    except (TypeError, ValueError):
         return None
     if amount < 0:
         return None
@@ -117,7 +133,7 @@ def _stored_ratio_to_percent(value: Any, default_ratio: float) -> int:
     """Convert a stored 0-1 ratio or 0-100 percent to a clamped whole percent."""
     try:
         amount = float(value)
-    except TypeError, ValueError:
+    except (TypeError, ValueError):
         amount = float(default_ratio)
     if amount <= 1:
         amount *= 100
@@ -139,7 +155,7 @@ def _form_kwh_to_wh(value: Any, default_kwh: float) -> int:
     """Convert a config flow kWh field to Wh for persisted optimizer config."""
     try:
         amount = float(value)
-    except TypeError, ValueError:
+    except (TypeError, ValueError):
         amount = default_kwh
     return round(amount * 1000)
 
@@ -148,7 +164,7 @@ def _form_kw_to_w(value: Any, default_kw: float) -> int:
     """Convert a config flow kW field to W for persisted optimizer config."""
     try:
         amount = float(value)
-    except TypeError, ValueError:
+    except (TypeError, ValueError):
         amount = default_kw
     return round(amount * 1000)
 
@@ -159,7 +175,7 @@ def _form_optional_kw_to_w(value: Any) -> int | None:
         return None
     try:
         amount = float(value)
-    except TypeError, ValueError:
+    except (TypeError, ValueError):
         return None
     if amount < 0:
         return None
@@ -170,7 +186,7 @@ def _form_percent_to_ratio(value: Any, default_ratio: float) -> float:
     """Convert a config flow percent field to a stored 0-1 ratio."""
     try:
         amount = float(value)
-    except TypeError, ValueError:
+    except (TypeError, ValueError):
         amount = default_ratio * 100
     return max(0.0, min(1.0, amount / 100.0))
 
@@ -187,9 +203,7 @@ def _default_optimizer_specs_for(battery_system: str) -> tuple[int, int, int]:
     return capacity_wh, power_w, power_w
 
 
-async def _validate_fleet_api_token_at(
-    hass: HomeAssistant, api_token: str, base_url: str
-) -> dict[str, Any]:
+async def _validate_fleet_api_token_at(hass: HomeAssistant, api_token: str, base_url: str) -> dict[str, Any]:
     """Validate a Fleet API token against a specific base URL."""
     session = async_get_clientsession(hass)
     headers = {
@@ -222,9 +236,7 @@ async def _validate_fleet_api_token_at(
         return {"success": False, "error": "cannot_connect"}
 
 
-async def validate_fleet_api_token(
-    hass: HomeAssistant, api_token: str
-) -> dict[str, Any]:
+async def validate_fleet_api_token(hass: HomeAssistant, api_token: str) -> dict[str, Any]:
     """Validate the Fleet API token and get sites.
 
     On a 421 "user out of region" response, Tesla returns the correct regional
@@ -238,9 +250,7 @@ async def validate_fleet_api_token(
             match = re.search(r"use base URL:\s*(https://[^\s,]+)", error_text)
             if match:
                 regional_url = match.group(1).rstrip("/")
-                _LOGGER.info(
-                    "Fleet API 421 — retrying with regional endpoint: %s", regional_url
-                )
+                _LOGGER.info("Fleet API 421 — retrying with regional endpoint: %s", regional_url)
                 return await _validate_fleet_api_token_at(hass, api_token, regional_url)
             _LOGGER.error(
                 "Fleet API 421 but could not parse regional URL from: %s",
@@ -254,6 +264,129 @@ async def validate_fleet_api_token(
     except Exception:
         _LOGGER.exception("Unexpected error validating Fleet API token")
         return {"success": False, "error": "unknown"}
+
+
+async def refresh_fleet_api_access_token(
+    hass: HomeAssistant,
+    client_id: str,
+    client_secret: str,
+    refresh_token: str,
+) -> dict[str, Any]:
+    """Exchange a refresh token for a new Fleet API access token."""
+    session = async_get_clientsession(hass)
+    payload = {
+        "grant_type": "refresh_token",
+        "client_id": client_id,
+        "client_secret": client_secret,
+        "refresh_token": refresh_token,
+    }
+
+    try:
+        async with session.post(
+            FLEET_API_TOKEN_URL,
+            data=payload,
+            timeout=aiohttp.ClientTimeout(total=30),
+        ) as response:
+            body = await response.json(content_type=None)
+            if response.status != 200:
+                return {
+                    "success": False,
+                    "error": ("invalid_auth" if response.status in (400, 401) else "cannot_connect"),
+                }
+
+            access_token = body.get("access_token")
+            if not access_token:
+                return {"success": False, "error": "invalid_auth"}
+
+            expires_in = body.get("expires_in")
+            try:
+                expires_in_seconds = max(60, int(float(expires_in or 0)))
+            except (TypeError, ValueError):
+                expires_in_seconds = 3600
+
+            return {
+                "success": True,
+                "access_token": access_token,
+                "refresh_token": body.get("refresh_token") or refresh_token,
+                "expires_at": time.time() + expires_in_seconds,
+            }
+    except aiohttp.ClientError:
+        _LOGGER.exception("Error refreshing Fleet API token")
+        return {"success": False, "error": "cannot_connect"}
+    except Exception:
+        _LOGGER.exception("Unexpected error refreshing Fleet API token")
+        return {"success": False, "error": "unknown"}
+
+
+async def exchange_fleet_api_authorization_code(
+    hass: HomeAssistant,
+    client_id: str,
+    client_secret: str,
+    redirect_uri: str,
+    code: str,
+) -> dict[str, Any]:
+    """Exchange OAuth authorization code for Fleet API tokens."""
+    session = async_get_clientsession(hass)
+    payload = {
+        "grant_type": "authorization_code",
+        "client_id": client_id,
+        "client_secret": client_secret,
+        "redirect_uri": redirect_uri,
+        "code": code,
+    }
+
+    try:
+        async with session.post(
+            FLEET_API_TOKEN_URL,
+            data=payload,
+            timeout=aiohttp.ClientTimeout(total=30),
+        ) as response:
+            body = await response.json(content_type=None)
+            if response.status != 200:
+                return {
+                    "success": False,
+                    "error": ("invalid_auth" if response.status in (400, 401) else "cannot_connect"),
+                }
+
+            access_token = body.get("access_token")
+            refresh_token = body.get("refresh_token")
+            if not access_token or not refresh_token:
+                return {"success": False, "error": "invalid_auth"}
+
+            expires_in = body.get("expires_in")
+            try:
+                expires_in_seconds = max(60, int(float(expires_in or 0)))
+            except (TypeError, ValueError):
+                expires_in_seconds = 3600
+
+            return {
+                "success": True,
+                "access_token": access_token,
+                "refresh_token": refresh_token,
+                "expires_at": time.time() + expires_in_seconds,
+            }
+    except aiohttp.ClientError:
+        _LOGGER.exception("Error exchanging Fleet API authorization code")
+        return {"success": False, "error": "cannot_connect"}
+    except Exception:
+        _LOGGER.exception("Unexpected error exchanging Fleet API authorization code")
+        return {"success": False, "error": "unknown"}
+
+
+def _extract_oauth_code_and_state(value: str) -> tuple[str | None, str | None]:
+    """Extract authorization code/state from either code or full callback URL."""
+    stripped = (value or "").strip()
+    if not stripped:
+        return None, None
+    if "?" in stripped and "code=" in stripped:
+        parsed = urlparse(stripped)
+        query = parse_qs(parsed.query)
+        code_values = query.get("code") or []
+        state_values = query.get("state") or []
+        code = code_values[0] if code_values else None
+        state = state_values[0] if state_values else None
+        return code, state
+    return stripped, None
 
 
 def _detect_tesla_fleet_integration(hass: HomeAssistant) -> dict[str, bool]:
@@ -284,13 +417,17 @@ class Teslav1rConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         self._tesla_fleet_token: str | None = None
         self._selected_provider: str | None = None
         self._reauth_entry: ConfigEntry | None = None
+        self._oauth_data: dict[str, Any] = {}
+        self._oauth_client_id: str | None = None
+        self._oauth_client_secret: str | None = None
+        self._oauth_base_url: str = FLEET_API_BASE_URL
+        self._oauth_redirect_uri: str = _DEFAULT_OAUTH_REDIRECT_URI
+        self._oauth_state: str | None = None
         # Battery system selection
         self._selected_battery_system: str = BATTERY_SYSTEM_TESLA
         self._battery_profile_data: dict[str, Any] = {}
 
-    async def async_step_user(
-        self, user_input: dict[str, Any] | None = None
-    ) -> FlowResult:
+    async def async_step_user(self, user_input: dict[str, Any] | None = None) -> FlowResult:
         """Handle the initial step - choose battery system first."""
         # Check if already configured
         await self.async_set_unique_id(DOMAIN)
@@ -306,21 +443,15 @@ class Teslav1rConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         straight to the relevant token entry step based on which provider
         the user originally configured.
         """
-        self._reauth_entry = self.hass.config_entries.async_get_entry(
-            self.context["entry_id"]
-        )
+        self._reauth_entry = self.hass.config_entries.async_get_entry(self.context["entry_id"])
         return await self.async_step_reauth_confirm()
 
-    async def async_step_reauth_confirm(
-        self, user_input: dict[str, Any] | None = None
-    ) -> FlowResult:
+    async def async_step_reauth_confirm(self, user_input: dict[str, Any] | None = None) -> FlowResult:
         """Show the reauth flow for the configured Tesla provider."""
         if self._reauth_entry is None:
             return self.async_abort(reason="reauth_failed")
 
-        _provider = self._reauth_entry.data.get(
-            CONF_TESLA_API_PROVIDER, TESLA_PROVIDER_FLEET_API
-        )
+        _provider = self._reauth_entry.data.get(CONF_TESLA_API_PROVIDER, TESLA_PROVIDER_FLEET_API)
 
         # Fleet API uses the existing tesla_fleet integration's tokens — no
         # token entry needed; abort and let the user fix tesla_fleet directly
@@ -330,55 +461,30 @@ class Teslav1rConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         """Route to battery system setup based on selection."""
         return await self.async_step_tesla_provider()
 
-    async def async_step_battery_connection_profile_setup(
-        self, user_input: dict[str, Any] | None = None
-    ) -> FlowResult:
+    async def async_step_battery_connection_profile_setup(self, user_input: dict[str, Any] | None = None) -> FlowResult:
         """Choose the battery connection bundle during initial setup."""
         battery_system = self._selected_battery_system or BATTERY_SYSTEM_TESLA
         profiles = profiles_for_system(battery_system)
         errors: dict[str, str] = {}
-        accepted_domains = {
-            domain for profile in profiles for domain in profile.upstream_domains
-        }
-        upstream_entries = [
-            entry
-            for domain in sorted(accepted_domains)
-            for entry in self.hass.config_entries.async_entries(domain)
-        ]
+        accepted_domains = {domain for profile in profiles for domain in profile.upstream_domains}
+        upstream_entries = [entry for domain in sorted(accepted_domains) for entry in self.hass.config_entries.async_entries(domain)]
 
         if user_input is not None:
             profile_id = str(user_input.get(CONF_BATTERY_CONNECTION_PROFILE) or "")
             profile = PROFILE_REGISTRY.get(profile_id)
-            selected_entry_id = str(
-                user_input.get(CONF_BATTERY_INTEGRATION_CONFIG_ENTRY_ID) or ""
-            ).strip()
-            anchor_entity = str(
-                user_input.get(CONF_BATTERY_INTEGRATION_ANCHOR_ENTITY) or ""
-            ).strip()
+            selected_entry_id = str(user_input.get(CONF_BATTERY_INTEGRATION_CONFIG_ENTRY_ID) or "").strip()
+            anchor_entity = str(user_input.get(CONF_BATTERY_INTEGRATION_ANCHOR_ENTITY) or "").strip()
             if profile is None or profile.battery_system != battery_system:
                 errors[CONF_BATTERY_CONNECTION_PROFILE] = "invalid_connection_profile"
             elif profile.requires_upstream:
                 if not selected_entry_id and len(upstream_entries) == 1:
                     selected_entry_id = upstream_entries[0].entry_id
-                selected_entry = (
-                    self.hass.config_entries.async_get_entry(selected_entry_id)
-                    if selected_entry_id
-                    else None
-                )
+                selected_entry = self.hass.config_entries.async_get_entry(selected_entry_id) if selected_entry_id else None
                 yaml_anchor_allowed = False
-                if selected_entry is None and not (
-                    yaml_anchor_allowed and anchor_entity
-                ):
-                    errors[CONF_BATTERY_INTEGRATION_CONFIG_ENTRY_ID] = (
-                        "battery_integration_source_required"
-                    )
-                elif (
-                    selected_entry is not None
-                    and selected_entry.domain not in profile.upstream_domains
-                ):
-                    errors[CONF_BATTERY_INTEGRATION_CONFIG_ENTRY_ID] = (
-                        "battery_integration_source_mismatch"
-                    )
+                if selected_entry is None and not (yaml_anchor_allowed and anchor_entity):
+                    errors[CONF_BATTERY_INTEGRATION_CONFIG_ENTRY_ID] = "battery_integration_source_required"
+                elif selected_entry is not None and selected_entry.domain not in profile.upstream_domains:
+                    errors[CONF_BATTERY_INTEGRATION_CONFIG_ENTRY_ID] = "battery_integration_source_mismatch"
 
                 if not errors and profile.route_kind == "ha_monitoring":
                     catalog = discover_battery_sensor_catalog(
@@ -410,13 +516,9 @@ class Teslav1rConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     ),
                 }
                 if selected_entry_id:
-                    self._battery_profile_data[
-                        CONF_BATTERY_INTEGRATION_CONFIG_ENTRY_ID
-                    ] = selected_entry_id
+                    self._battery_profile_data[CONF_BATTERY_INTEGRATION_CONFIG_ENTRY_ID] = selected_entry_id
                 if anchor_entity:
-                    self._battery_profile_data[
-                        CONF_BATTERY_INTEGRATION_ANCHOR_ENTITY
-                    ] = anchor_entity
+                    self._battery_profile_data[CONF_BATTERY_INTEGRATION_ANCHOR_ENTITY] = anchor_entity
                 return await self._route_to_battery_setup()
 
         schema_fields: dict[Any, Any] = {
@@ -425,10 +527,7 @@ class Teslav1rConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 default=profiles[0].profile_id,
             ): SelectSelector(
                 SelectSelectorConfig(
-                    options=[
-                        SelectOptionDict(value=profile.profile_id, label=profile.label)
-                        for profile in profiles
-                    ],
+                    options=[SelectOptionDict(value=profile.profile_id, label=profile.label) for profile in profiles],
                     mode=SelectSelectorMode.DROPDOWN,
                 )
             ),
@@ -437,27 +536,22 @@ class Teslav1rConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 default=BATTERY_SENSOR_DISPLAY_RECOMMENDED,
             ): SelectSelector(
                 SelectSelectorConfig(
-                    options=[
-                        SelectOptionDict(value=value, label=label)
-                        for value, label in BATTERY_SENSOR_DISPLAY_MODES.items()
-                    ],
+                    options=[SelectOptionDict(value=value, label=label) for value, label in BATTERY_SENSOR_DISPLAY_MODES.items()],
                     mode=SelectSelectorMode.DROPDOWN,
                 )
             ),
         }
         if upstream_entries:
-            schema_fields[Optional(CONF_BATTERY_INTEGRATION_CONFIG_ENTRY_ID)] = (
-                SelectSelector(
-                    SelectSelectorConfig(
-                        options=[
-                            SelectOptionDict(
-                                value=source.entry_id,
-                                label=f"{source.title or source.entry_id} ({source.domain})",
-                            )
-                            for source in upstream_entries
-                        ],
-                        mode=SelectSelectorMode.DROPDOWN,
-                    )
+            schema_fields[Optional(CONF_BATTERY_INTEGRATION_CONFIG_ENTRY_ID)] = SelectSelector(
+                SelectSelectorConfig(
+                    options=[
+                        SelectOptionDict(
+                            value=source.entry_id,
+                            label=f"{source.title or source.entry_id} ({source.domain})",
+                        )
+                        for source in upstream_entries
+                    ],
+                    mode=SelectSelectorMode.DROPDOWN,
                 )
             )
         return self.async_show_form(
@@ -484,14 +578,10 @@ class Teslav1rConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
         return self.async_create_entry(title=title, data=data)
 
-    async def async_step_battery_system(
-        self, user_input: dict[str, Any] | None = None
-    ) -> FlowResult:
+    async def async_step_battery_system(self, user_input: dict[str, Any] | None = None) -> FlowResult:
         """Let user choose battery system - Tesla (first step)."""
         if user_input is not None:
-            self._selected_battery_system = user_input.get(
-                CONF_BATTERY_SYSTEM, BATTERY_SYSTEM_TESLA
-            )
+            self._selected_battery_system = user_input.get(CONF_BATTERY_SYSTEM, BATTERY_SYSTEM_TESLA)
 
             return await self._route_to_battery_setup()
 
@@ -499,14 +589,9 @@ class Teslav1rConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             step_id="battery_system",
             data_schema=Schema(
                 {
-                    Required(
-                        CONF_BATTERY_SYSTEM, default=BATTERY_SYSTEM_TESLA
-                    ): SelectSelector(
+                    Required(CONF_BATTERY_SYSTEM, default=BATTERY_SYSTEM_TESLA): SelectSelector(
                         SelectSelectorConfig(
-                            options=[
-                                SelectOptionDict(value=k, label=v)
-                                for k, v in BATTERY_SYSTEMS.items()
-                            ],
+                            options=[SelectOptionDict(value=k, label=v) for k, v in BATTERY_SYSTEMS.items()],
                             # Keep this as a dropdown so newer battery systems
                             # do not get pushed below the fold in the setup UI.
                             mode=SelectSelectorMode.DROPDOWN,
@@ -516,10 +601,8 @@ class Teslav1rConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             ),
         )
 
-    async def async_step_tesla_provider(
-        self, user_input: dict[str, Any] | None = None
-    ) -> FlowResult:
-        """Let user choose between Tesla Fleet and Nothing."""
+    async def async_step_tesla_provider(self, user_input: dict[str, Any] | None = None) -> FlowResult:
+        """Set Tesla API source, preferring tesla_fleet when available."""
         # Check if Tesla Fleet integration is configured and loaded
         self._tesla_fleet_available = False
         self._tesla_fleet_token = None
@@ -528,22 +611,26 @@ class Teslav1rConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             energy_options: list[SelectOptionDict] = [
                 SelectOptionDict(
                     value=TESLA_PROVIDER_FLEET_API,
-                    label="Tesla Fleet API (Free - uses existing Tesla Fleet integration)",
+                    label=("Tesla Fleet API" if include_fleet else "Tesla Fleet API (enter OAuth app credentials below)"),
                 ),
             ]
+            schema_fields: dict[Any, Any] = {
+                Required(CONF_TESLA_API_PROVIDER, default=TESLA_PROVIDER_FLEET_API): SelectSelector(
+                    SelectSelectorConfig(
+                        options=energy_options,
+                        mode=SelectSelectorMode.LIST,
+                    )
+                ),
+            }
 
-            return Schema(
-                {
-                    Required(
-                        CONF_TESLA_API_PROVIDER, default=TESLA_PROVIDER_FLEET_API
-                    ): SelectSelector(
-                        SelectSelectorConfig(
-                            options=energy_options,
-                            mode=SelectSelectorMode.LIST,
-                        )
-                    ),
-                }
-            )
+            if not include_fleet:
+                schema_fields[Required(CONF_FLEET_API_CLIENT_ID)] = str
+                schema_fields[Required(CONF_FLEET_API_CLIENT_SECRET)] = str
+                schema_fields[Optional(CONF_FLEET_API_REFRESH_TOKEN, default="")] = str
+                schema_fields[Optional(CONF_FLEET_API_BASE_URL, default=FLEET_API_BASE_URL)] = str
+                schema_fields[Optional(_FIELD_OAUTH_REDIRECT_URI, default=_DEFAULT_OAUTH_REDIRECT_URI)] = str
+
+            return Schema(schema_fields)
 
         tesla_fleet_entries = self.hass.config_entries.async_entries("tesla_fleet")
         if tesla_fleet_entries:
@@ -555,20 +642,7 @@ class Teslav1rConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                             if CONF_ACCESS_TOKEN in token_data:
                                 self._tesla_fleet_token = token_data[CONF_ACCESS_TOKEN]
                                 self._tesla_fleet_available = True
-                                _LOGGER.info(
-                                    "Tesla Fleet integration detected and available"
-                                )
-                            else:
-                                # Hard fail — Tesla Fleet OAuth can't be entered manually here
-                                return self.async_show_form(
-                                    step_id="tesla_provider",
-                                    data_schema=_build_schema(
-                                        self._tesla_fleet_available
-                                    ),
-                                    errors={
-                                        CONF_TESLA_API_PROVIDER: "tesla_fleet_not_installed"
-                                    },
-                                )
+                                _LOGGER.info("Tesla Fleet integration detected and available")
                     except Exception as e:
                         _LOGGER.warning(
                             "Failed to extract tokens from Tesla Fleet integration: %s",
@@ -580,17 +654,17 @@ class Teslav1rConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             self._selected_provider = user_input[CONF_TESLA_API_PROVIDER]
 
             if self._selected_provider == TESLA_PROVIDER_FLEET_API:
-                # User chose Fleet API - validate and get sites
-                _LOGGER.info("User selected Tesla Fleet API")
-                validation_result = await validate_fleet_api_token(
-                    self.hass, self._tesla_fleet_token
-                )
+                if self._tesla_fleet_available and self._tesla_fleet_token:
+                    _LOGGER.info("User selected Tesla Fleet API via tesla_fleet token bridge")
+                    validation_result = await validate_fleet_api_token(self.hass, self._tesla_fleet_token)
+                    if validation_result["success"]:
+                        self._tesla_sites = validation_result.get("sites", [])
+                        self._oauth_data = {
+                            CONF_TESLA_API_PROVIDER: TESLA_PROVIDER_FLEET_API,
+                            CONF_FLEET_API_BASE_URL: validation_result.get("base_url", FLEET_API_BASE_URL),
+                        }
+                        return await self.async_step_site_selection()
 
-                if validation_result["success"]:
-                    self._tesla_sites = validation_result.get("sites", [])
-                    return await self.async_step_site_selection()
-                else:
-                    # Fleet API validation failed - show error
                     errors = {"base": validation_result.get("error", "unknown")}
                     return self.async_show_form(
                         step_id="tesla_provider",
@@ -598,32 +672,154 @@ class Teslav1rConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                         errors=errors,
                     )
 
+                client_id = str(user_input.get(CONF_FLEET_API_CLIENT_ID, "")).strip()
+                client_secret = str(user_input.get(CONF_FLEET_API_CLIENT_SECRET, "")).strip()
+                refresh_token = str(user_input.get(CONF_FLEET_API_REFRESH_TOKEN, "")).strip()
+                configured_base_url = str(user_input.get(CONF_FLEET_API_BASE_URL, FLEET_API_BASE_URL)).strip() or FLEET_API_BASE_URL
+                redirect_uri = (
+                    str(user_input.get(_FIELD_OAUTH_REDIRECT_URI, _DEFAULT_OAUTH_REDIRECT_URI)).strip() or _DEFAULT_OAUTH_REDIRECT_URI
+                )
+
+                if not refresh_token:
+                    self._oauth_client_id = client_id
+                    self._oauth_client_secret = client_secret
+                    self._oauth_base_url = configured_base_url
+                    self._oauth_redirect_uri = redirect_uri
+                    self._oauth_state = secrets.token_urlsafe(24)
+                    return await self.async_step_tesla_authorize()
+
+                refresh_result = await refresh_fleet_api_access_token(
+                    self.hass,
+                    client_id,
+                    client_secret,
+                    refresh_token,
+                )
+                if not refresh_result.get("success"):
+                    errors = {"base": refresh_result.get("error", "invalid_auth")}
+                    return self.async_show_form(
+                        step_id="tesla_provider",
+                        data_schema=_build_schema(include_fleet=False),
+                        errors=errors,
+                    )
+
+                access_token = refresh_result["access_token"]
+                validation_result = await validate_fleet_api_token(self.hass, access_token)
+
+                if validation_result["success"]:
+                    self._tesla_sites = validation_result.get("sites", [])
+                    self._oauth_data = {
+                        CONF_TESLA_API_PROVIDER: TESLA_PROVIDER_FLEET_API,
+                        CONF_FLEET_API_CLIENT_ID: client_id,
+                        CONF_FLEET_API_CLIENT_SECRET: client_secret,
+                        CONF_FLEET_API_ACCESS_TOKEN: access_token,
+                        CONF_FLEET_API_REFRESH_TOKEN: refresh_result["refresh_token"],
+                        CONF_FLEET_API_TOKEN_EXPIRES_AT: refresh_result["expires_at"],
+                        CONF_FLEET_API_BASE_URL: validation_result.get("base_url", configured_base_url),
+                    }
+                    return await self.async_step_site_selection()
+
+                errors = {"base": validation_result.get("error", "unknown")}
+                return self.async_show_form(
+                    step_id="tesla_provider",
+                    data_schema=_build_schema(include_fleet=False),
+                    errors=errors,
+                )
+
         # Show provider selection form — default to Tesla Fleet (free, recommended)
         return self.async_show_form(
             step_id="tesla_provider",
-            data_schema=_build_schema(include_fleet=True),
+            data_schema=_build_schema(include_fleet=self._tesla_fleet_available),
             description_placeholders={
-                "fleet_detected": "✓ Tesla Fleet integration detected!",
+                "fleet_detected": (
+                    "✓ Tesla Fleet integration detected!"
+                    if self._tesla_fleet_available
+                    else "Tesla Fleet integration not detected; enter OAuth app credentials"
+                ),
             },
         )
 
-    async def async_step_site_selection(
-        self, user_input: dict[str, Any] | None = None
-    ) -> FlowResult:
+    async def async_step_tesla_authorize(self, user_input: dict[str, Any] | None = None) -> FlowResult:
+        """Obtain refresh token from auth-code flow using client id/secret."""
+        errors: dict[str, str] = {}
+
+        if not self._oauth_client_id or not self._oauth_client_secret:
+            return await self.async_step_tesla_provider()
+
+        if user_input is not None:
+            callback_input = str(user_input.get(_FIELD_OAUTH_CALLBACK_INPUT, "")).strip()
+            code, returned_state = _extract_oauth_code_and_state(callback_input)
+
+            if not code:
+                errors["base"] = "invalid_auth"
+            elif returned_state and self._oauth_state and returned_state != self._oauth_state:
+                errors["base"] = "invalid_auth"
+            else:
+                exchange_result = await exchange_fleet_api_authorization_code(
+                    self.hass,
+                    self._oauth_client_id,
+                    self._oauth_client_secret,
+                    self._oauth_redirect_uri,
+                    code,
+                )
+                if not exchange_result.get("success"):
+                    errors["base"] = exchange_result.get("error", "invalid_auth")
+                else:
+                    access_token = exchange_result["access_token"]
+                    validation_result = await validate_fleet_api_token(self.hass, access_token)
+                    if not validation_result.get("success"):
+                        errors["base"] = validation_result.get("error", "unknown")
+                    else:
+                        self._tesla_sites = validation_result.get("sites", [])
+                        self._oauth_data = {
+                            CONF_TESLA_API_PROVIDER: TESLA_PROVIDER_FLEET_API,
+                            CONF_FLEET_API_CLIENT_ID: self._oauth_client_id,
+                            CONF_FLEET_API_CLIENT_SECRET: self._oauth_client_secret,
+                            CONF_FLEET_API_ACCESS_TOKEN: access_token,
+                            CONF_FLEET_API_REFRESH_TOKEN: exchange_result["refresh_token"],
+                            CONF_FLEET_API_TOKEN_EXPIRES_AT: exchange_result["expires_at"],
+                            CONF_FLEET_API_BASE_URL: validation_result.get("base_url", self._oauth_base_url),
+                        }
+                        return await self.async_step_site_selection()
+
+        authorize_url = (
+            f"{FLEET_API_AUTH_URL}?"
+            f"{
+                urlencode(
+                    {
+                        'response_type': 'code',
+                        'client_id': self._oauth_client_id,
+                        'redirect_uri': self._oauth_redirect_uri,
+                        'scope': _ENERGY_ONLY_SCOPES,
+                        'state': self._oauth_state or '',
+                    }
+                )
+            }"
+        )
+
+        return self.async_show_form(
+            step_id="tesla_authorize",
+            data_schema=Schema({Required(_FIELD_OAUTH_CALLBACK_INPUT): str}),
+            errors=errors,
+            description_placeholders={
+                "authorize_url": authorize_url,
+                "redirect_uri": self._oauth_redirect_uri,
+            },
+        )
+
+    async def async_step_site_selection(self, user_input: dict[str, Any] | None = None) -> FlowResult:
         """Handle site selection for both Amber and Tesla."""
         errors: dict[str, str] = {}
 
         if user_input is not None:
             try:
-                gateway_ip = normalize_powerwall_gateway_host(
-                    user_input.get(CONF_POWERWALL_LOCAL_IP)
-                )
+                gateway_ip = normalize_powerwall_gateway_host(user_input.get(CONF_POWERWALL_LOCAL_IP))
             except ValueError:
                 errors[CONF_POWERWALL_LOCAL_IP] = "powerwall_gateway_invalid"
             else:
                 # Store site selection data
                 self._site_data = {
                     CONF_TESLA_ENERGY_SITE_ID: user_input[CONF_TESLA_ENERGY_SITE_ID],
+                    **self._oauth_data,
                 }
 
                 if gateway_ip:
@@ -683,9 +879,7 @@ class Teslav1rOptionsFlow(config_entries.OptionsFlow):
 
     def _get_option(self, key: str, default: Any = None) -> Any:
         """Get option value with fallback to data for backwards compatibility."""
-        return self.config_entry.options.get(
-            key, self.config_entry.data.get(key, default)
-        )
+        return self.config_entry.options.get(key, self.config_entry.data.get(key, default))
 
     def _effective_battery_system(self) -> str:
         """Return the configured battery/control method."""
@@ -693,9 +887,7 @@ class Teslav1rOptionsFlow(config_entries.OptionsFlow):
 
     def _schedule_entry_reload(self) -> None:
         """Reload the entry after structural connection changes."""
-        self.hass.async_create_task(
-            self.hass.config_entries.async_reload(self.config_entry.entry_id)
-        )
+        self.hass.async_create_task(self.hass.config_entries.async_reload(self.config_entry.entry_id))
 
     def _save_battery_system_selection(self, battery_system: str) -> None:
         """Persist the selected battery/control method in data and options."""
@@ -726,9 +918,7 @@ class Teslav1rOptionsFlow(config_entries.OptionsFlow):
         new_data = dict(self.config_entry.data)
         new_options = dict(self.config_entry.options)
         new_data.update(data_updates)
-        new_options.update(
-            option_updates if option_updates is not None else data_updates
-        )
+        new_options.update(option_updates if option_updates is not None else data_updates)
         self.hass.config_entries.async_update_entry(
             self.config_entry,
             data=new_data,
@@ -764,9 +954,7 @@ class Teslav1rOptionsFlow(config_entries.OptionsFlow):
                 data=new_data,
             )
 
-    async def async_step_init(
-        self, user_input: dict[str, Any] | None = None
-    ) -> FlowResult:
+    async def async_step_init(self, user_input: dict[str, Any] | None = None) -> FlowResult:
         """Show options menu -- user picks which section to reconfigure."""
         battery_system = self._effective_battery_system()
 
@@ -782,35 +970,10 @@ class Teslav1rOptionsFlow(config_entries.OptionsFlow):
         elif battery_system == BATTERY_SYSTEM_CUSTOM:
             menu_options.append("custom_battery")
 
-        menu_options.extend(
-            [
-                "advanced",
-            ]
-        )
-
         return self.async_show_menu(
             step_id="init",
             menu_options=menu_options,
         )
-
-    async def async_step_advanced(
-        self, user_input: dict[str, Any] | None = None
-    ) -> FlowResult:
-        """Show optional and specialist settings outside the main path."""
-        menu_options = [
-            "back",
-        ]
-
-        return self.async_show_menu(
-            step_id="advanced",
-            menu_options=menu_options,
-        )
-
-    async def async_step_back(
-        self, user_input: dict[str, Any] | None = None
-    ) -> FlowResult:
-        """Return from a nested options menu to the main settings menu."""
-        return await self.async_step_init()
 
     @staticmethod
     def _network_export_power_state_valid(
@@ -847,15 +1010,9 @@ class Teslav1rOptionsFlow(config_entries.OptionsFlow):
             return "network_export_source_untrusted"
         if not getattr(registry_entry, "unique_id", None):
             return "network_export_source_untrusted"
-        if not (
-            getattr(registry_entry, "device_id", None)
-            or getattr(registry_entry, "config_entry_id", None)
-        ):
+        if not (getattr(registry_entry, "device_id", None) or getattr(registry_entry, "config_entry_id", None)):
             return "network_export_source_untrusted"
-        if (
-            getattr(registry_entry, "config_entry_id", None)
-            == self.config_entry.entry_id
-        ):
+        if getattr(registry_entry, "config_entry_id", None) == self.config_entry.entry_id:
             return "network_export_source_untrusted"
         return None
 
@@ -867,9 +1024,7 @@ class Teslav1rOptionsFlow(config_entries.OptionsFlow):
             return await self.async_step_custom_battery()
         return await self.async_step_tesla_connection()
 
-    async def async_step_battery_system(
-        self, user_input: dict[str, Any] | None = None
-    ) -> FlowResult:
+    async def async_step_battery_system(self, user_input: dict[str, Any] | None = None) -> FlowResult:
         """Menu handler: choose or change battery/control method."""
         if user_input is not None:
             battery_system = user_input.get(CONF_BATTERY_SYSTEM, BATTERY_SYSTEM_TESLA)
@@ -887,10 +1042,7 @@ class Teslav1rOptionsFlow(config_entries.OptionsFlow):
                         default=self._effective_battery_system(),
                     ): SelectSelector(
                         SelectSelectorConfig(
-                            options=[
-                                SelectOptionDict(value=k, label=v)
-                                for k, v in BATTERY_SYSTEMS.items()
-                            ],
+                            options=[SelectOptionDict(value=k, label=v) for k, v in BATTERY_SYSTEMS.items()],
                             mode=SelectSelectorMode.DROPDOWN,
                         )
                     ),
@@ -898,9 +1050,7 @@ class Teslav1rOptionsFlow(config_entries.OptionsFlow):
             ),
         )
 
-    async def async_step_battery_connection_profile(
-        self, user_input: dict[str, Any] | None = None
-    ) -> FlowResult:
+    async def async_step_battery_connection_profile(self, user_input: dict[str, Any] | None = None) -> FlowResult:
         """Select one validated connection bundle and upstream source."""
         battery_system = self._effective_battery_system()
         profiles = profiles_for_system(battery_system)
@@ -911,53 +1061,27 @@ class Teslav1rOptionsFlow(config_entries.OptionsFlow):
         )
         errors: dict[str, str] = {}
 
-        accepted_domains = {
-            domain for profile in profiles for domain in profile.upstream_domains
-        }
-        upstream_entries = [
-            entry
-            for domain in sorted(accepted_domains)
-            for entry in self.hass.config_entries.async_entries(domain)
-        ]
+        accepted_domains = {domain for profile in profiles for domain in profile.upstream_domains}
+        upstream_entries = [entry for domain in sorted(accepted_domains) for entry in self.hass.config_entries.async_entries(domain)]
 
         if user_input is not None:
             profile_id = str(user_input.get(CONF_BATTERY_CONNECTION_PROFILE) or "")
             profile = PROFILE_REGISTRY.get(profile_id)
-            selected_entry_id = str(
-                user_input.get(CONF_BATTERY_INTEGRATION_CONFIG_ENTRY_ID) or ""
-            ).strip()
-            anchor_entity = str(
-                user_input.get(CONF_BATTERY_INTEGRATION_ANCHOR_ENTITY) or ""
-            ).strip()
+            selected_entry_id = str(user_input.get(CONF_BATTERY_INTEGRATION_CONFIG_ENTRY_ID) or "").strip()
+            anchor_entity = str(user_input.get(CONF_BATTERY_INTEGRATION_ANCHOR_ENTITY) or "").strip()
             if profile is None or profile.battery_system != battery_system:
                 errors[CONF_BATTERY_CONNECTION_PROFILE] = "invalid_connection_profile"
             elif profile.requires_upstream:
                 if not selected_entry_id and len(upstream_entries) == 1:
                     selected_entry_id = upstream_entries[0].entry_id
-                selected_entry = (
-                    self.hass.config_entries.async_get_entry(selected_entry_id)
-                    if selected_entry_id
-                    else None
-                )
+                selected_entry = self.hass.config_entries.async_get_entry(selected_entry_id) if selected_entry_id else None
                 yaml_anchor_allowed = False
-                if selected_entry is None and not (
-                    yaml_anchor_allowed and anchor_entity
-                ):
-                    errors[CONF_BATTERY_INTEGRATION_CONFIG_ENTRY_ID] = (
-                        "battery_integration_source_required"
-                    )
-                elif (
-                    selected_entry is not None
-                    and selected_entry.domain not in profile.upstream_domains
-                ):
-                    errors[CONF_BATTERY_INTEGRATION_CONFIG_ENTRY_ID] = (
-                        "battery_integration_source_mismatch"
-                    )
+                if selected_entry is None and not (yaml_anchor_allowed and anchor_entity):
+                    errors[CONF_BATTERY_INTEGRATION_CONFIG_ENTRY_ID] = "battery_integration_source_required"
+                elif selected_entry is not None and selected_entry.domain not in profile.upstream_domains:
+                    errors[CONF_BATTERY_INTEGRATION_CONFIG_ENTRY_ID] = "battery_integration_source_mismatch"
 
-                if not errors and (
-                    profile.route_kind == "ha_monitoring"
-                    or profile.profile_id in {"goodwe_ha", "solaredge_ha_only"}
-                ):
+                if not errors and (profile.route_kind == "ha_monitoring" or profile.profile_id in {"goodwe_ha", "solaredge_ha_only"}):
                     catalog = discover_battery_sensor_catalog(
                         self.hass,
                         battery_system=battery_system,
@@ -986,9 +1110,7 @@ class Teslav1rOptionsFlow(config_entries.OptionsFlow):
                     ),
                 }
                 if selected_entry_id:
-                    updates[CONF_BATTERY_INTEGRATION_CONFIG_ENTRY_ID] = (
-                        selected_entry_id
-                    )
+                    updates[CONF_BATTERY_INTEGRATION_CONFIG_ENTRY_ID] = selected_entry_id
                 else:
                     updates[CONF_BATTERY_INTEGRATION_CONFIG_ENTRY_ID] = None
                 if anchor_entity:
@@ -1004,10 +1126,7 @@ class Teslav1rOptionsFlow(config_entries.OptionsFlow):
                 default=current_profile.profile_id,
             ): SelectSelector(
                 SelectSelectorConfig(
-                    options=[
-                        SelectOptionDict(value=profile.profile_id, label=profile.label)
-                        for profile in profiles
-                    ],
+                    options=[SelectOptionDict(value=profile.profile_id, label=profile.label) for profile in profiles],
                     mode=SelectSelectorMode.DROPDOWN,
                 )
             ),
@@ -1019,18 +1138,13 @@ class Teslav1rOptionsFlow(config_entries.OptionsFlow):
                 ),
             ): SelectSelector(
                 SelectSelectorConfig(
-                    options=[
-                        SelectOptionDict(value=value, label=label)
-                        for value, label in BATTERY_SENSOR_DISPLAY_MODES.items()
-                    ],
+                    options=[SelectOptionDict(value=value, label=label) for value, label in BATTERY_SENSOR_DISPLAY_MODES.items()],
                     mode=SelectSelectorMode.DROPDOWN,
                 )
             ),
         }
         if upstream_entries:
-            current_source = self._get_option(
-                CONF_BATTERY_INTEGRATION_CONFIG_ENTRY_ID, ""
-            )
+            current_source = self._get_option(CONF_BATTERY_INTEGRATION_CONFIG_ENTRY_ID, "")
             schema_fields[
                 Optional(
                     CONF_BATTERY_INTEGRATION_CONFIG_ENTRY_ID,
@@ -1058,16 +1172,23 @@ class Teslav1rOptionsFlow(config_entries.OptionsFlow):
             },
         )
 
-    async def async_step_tesla_connection(
-        self, user_input: dict[str, Any] | None = None
-    ) -> FlowResult:
+    async def async_step_tesla_connection(self, user_input: dict[str, Any] | None = None) -> FlowResult:
         """Menu handler: Tesla Energy/EV API provider + local gateway IP."""
         errors: dict[str, str] = {}
+        current_refresh_token = str(self.config_entry.data.get(CONF_FLEET_API_REFRESH_TOKEN, ""))
+        tesla_fleet_available = False
+        tesla_fleet_token: str | None = None
+        for tesla_entry in self.hass.config_entries.async_entries("tesla_fleet"):
+            if tesla_entry.state != ConfigEntryState.LOADED:
+                continue
+            token_data = tesla_entry.data.get(CONF_TOKEN)
+            if isinstance(token_data, dict) and CONF_ACCESS_TOKEN in token_data:
+                tesla_fleet_available = True
+                tesla_fleet_token = str(token_data[CONF_ACCESS_TOKEN])
+                break
 
         if user_input is not None:
-            tesla_provider = user_input.get(
-                CONF_TESLA_API_PROVIDER, TESLA_PROVIDER_FLEET_API
-            )
+            tesla_provider = user_input.get(CONF_TESLA_API_PROVIDER, TESLA_PROVIDER_FLEET_API)
             # Optional Powerwall local LAN access. Empty gateway IP clears it
             # (back to cloud-only mode); a non-empty IP requires the gateway
             # customer password.
@@ -1078,9 +1199,44 @@ class Teslav1rOptionsFlow(config_entries.OptionsFlow):
                 gateway_ip = ""
                 errors[CONF_POWERWALL_LOCAL_IP] = "powerwall_gateway_invalid"
 
+            new_data = dict(self.config_entry.data)
+            new_data[CONF_TESLA_API_PROVIDER] = tesla_provider
+
+            if not errors and tesla_provider == TESLA_PROVIDER_FLEET_API:
+                if tesla_fleet_available and tesla_fleet_token:
+                    validation_result = await validate_fleet_api_token(self.hass, tesla_fleet_token)
+                    if not validation_result.get("success"):
+                        errors["base"] = validation_result.get("error", "unknown")
+                    else:
+                        new_data[CONF_FLEET_API_BASE_URL] = validation_result.get("base_url", FLEET_API_BASE_URL)
+                else:
+                    client_id = str(user_input.get(CONF_FLEET_API_CLIENT_ID, "")).strip()
+                    client_secret = str(user_input.get(CONF_FLEET_API_CLIENT_SECRET, "")).strip()
+                    refresh_token = str(user_input.get(CONF_FLEET_API_REFRESH_TOKEN, "")).strip()
+                    configured_base_url = str(user_input.get(CONF_FLEET_API_BASE_URL, FLEET_API_BASE_URL)).strip() or FLEET_API_BASE_URL
+
+                    refresh_result = await refresh_fleet_api_access_token(
+                        self.hass,
+                        client_id,
+                        client_secret,
+                        refresh_token,
+                    )
+                    if not refresh_result.get("success"):
+                        errors["base"] = refresh_result.get("error", "invalid_auth")
+                    else:
+                        access_token = refresh_result["access_token"]
+                        validation_result = await validate_fleet_api_token(self.hass, access_token)
+                        if not validation_result.get("success"):
+                            errors["base"] = validation_result.get("error", "unknown")
+                        else:
+                            new_data[CONF_FLEET_API_CLIENT_ID] = client_id
+                            new_data[CONF_FLEET_API_CLIENT_SECRET] = client_secret
+                            new_data[CONF_FLEET_API_ACCESS_TOKEN] = access_token
+                            new_data[CONF_FLEET_API_REFRESH_TOKEN] = refresh_result["refresh_token"]
+                            new_data[CONF_FLEET_API_TOKEN_EXPIRES_AT] = refresh_result["expires_at"]
+                            new_data[CONF_FLEET_API_BASE_URL] = validation_result.get("base_url", configured_base_url)
+
             if not errors:
-                new_data = dict(self.config_entry.data)
-                new_data[CONF_TESLA_API_PROVIDER] = tesla_provider
                 # Persist gateway IP changes; remove the key entirely when
                 # cleared so the diagnostic binary_sensor flips correctly
                 # rather than reading an empty string as "set".
@@ -1088,71 +1244,62 @@ class Teslav1rOptionsFlow(config_entries.OptionsFlow):
                     new_data[CONF_POWERWALL_LOCAL_IP] = gateway_ip
                 else:
                     new_data.pop(CONF_POWERWALL_LOCAL_IP, None)
-                self.hass.config_entries.async_update_entry(
-                    self.config_entry, data=new_data
-                )
+                self.hass.config_entries.async_update_entry(self.config_entry, data=new_data)
 
                 # Route to token step
                 self._tesla_provider = tesla_provider
 
                 # Fleet API -- save directly
                 self._schedule_entry_reload()
-                return self.async_create_entry(
-                    title="", data=dict(self.config_entry.options)
-                )
+                return self.async_create_entry(title="", data=dict(self.config_entry.options))
 
-        current_tesla_provider = self.config_entry.data.get(
-            CONF_TESLA_API_PROVIDER, TESLA_PROVIDER_FLEET_API
-        )
+        current_tesla_provider = self.config_entry.data.get(CONF_TESLA_API_PROVIDER, TESLA_PROVIDER_FLEET_API)
         current_gateway_ip = self.config_entry.data.get(CONF_POWERWALL_LOCAL_IP, "")
+        current_client_id = self.config_entry.data.get(CONF_FLEET_API_CLIENT_ID, "")
+        current_client_secret = self.config_entry.data.get(CONF_FLEET_API_CLIENT_SECRET, "")
+        current_base_url = self.config_entry.data.get(CONF_FLEET_API_BASE_URL, FLEET_API_BASE_URL)
 
         tesla_providers = {
             TESLA_PROVIDER_FLEET_API: "Tesla Fleet API (Free - requires Tesla Fleet integration)",
         }
 
+        schema_fields: dict[Marker, Any] = {
+            Required(
+                CONF_TESLA_API_PROVIDER,
+                default=current_tesla_provider,
+            ): SelectSelector(
+                SelectSelectorConfig(
+                    options=[SelectOptionDict(value=k, label=v) for k, v in tesla_providers.items()],
+                    mode=SelectSelectorMode.DROPDOWN,
+                )
+            ),
+            Required(
+                CONF_POWERWALL_LOCAL_IP,
+                default=current_gateway_ip,
+            ): str,
+        }
+
+        if not tesla_fleet_available:
+            schema_fields[Required(CONF_FLEET_API_CLIENT_ID, default=current_client_id)] = str
+            schema_fields[Required(CONF_FLEET_API_CLIENT_SECRET, default=current_client_secret)] = str
+            schema_fields[Required(CONF_FLEET_API_REFRESH_TOKEN, default=current_refresh_token)] = str
+            schema_fields[Optional(CONF_FLEET_API_BASE_URL, default=current_base_url)] = str
+
         return self.async_show_form(
             step_id="tesla_connection",
-            data_schema=Schema(
-                {
-                    Required(
-                        CONF_TESLA_API_PROVIDER,
-                        default=current_tesla_provider,
-                    ): SelectSelector(
-                        SelectSelectorConfig(
-                            options=[
-                                SelectOptionDict(value=k, label=v)
-                                for k, v in tesla_providers.items()
-                            ],
-                            mode=SelectSelectorMode.DROPDOWN,
-                        )
-                    ),
-                    # Optional gateway LAN IP for direct local features.
-                    # Pairing is cloud-based; gateway control uses RSA
-                    # signing — no password required.
-                    Required(
-                        CONF_POWERWALL_LOCAL_IP,
-                        default=current_gateway_ip,
-                    ): str,
-                }
-            ),
+            data_schema=Schema(schema_fields),
             errors=errors,
         )
 
-    async def async_step_init_tesla(
-        self, user_input: dict[str, Any] | None = None
-    ) -> FlowResult:
+    async def async_step_init_tesla(self, user_input: dict[str, Any] | None = None) -> FlowResult:
         """Step 1 for Tesla users: select electricity provider and Tesla API providers."""
         errors: dict[str, str] = {}
 
         if user_input is not None:
             # Store provider selections
-            self._tesla_provider = user_input.get(
-                CONF_TESLA_API_PROVIDER, TESLA_PROVIDER_FLEET_API
-            )
+            self._tesla_provider = user_input.get(CONF_TESLA_API_PROVIDER, TESLA_PROVIDER_FLEET_API)
 
-            current_tesla_provider = self.config_entry.data.get(
-                CONF_TESLA_API_PROVIDER, TESLA_PROVIDER_FLEET_API
-            )
+            current_tesla_provider = self.config_entry.data.get(CONF_TESLA_API_PROVIDER, TESLA_PROVIDER_FLEET_API)
 
             if not errors:
                 # Fleet API — no token entry needed
@@ -1160,13 +1307,9 @@ class Teslav1rOptionsFlow(config_entries.OptionsFlow):
                 if self._tesla_provider != current_tesla_provider:
                     new_data[CONF_TESLA_API_PROVIDER] = self._tesla_provider
 
-                self.hass.config_entries.async_update_entry(
-                    self.config_entry, data=new_data
-                )
+                self.hass.config_entries.async_update_entry(self.config_entry, data=new_data)
 
-        current_tesla_provider = self.config_entry.data.get(
-            CONF_TESLA_API_PROVIDER, TESLA_PROVIDER_FLEET_API
-        )
+        current_tesla_provider = self.config_entry.data.get(CONF_TESLA_API_PROVIDER, TESLA_PROVIDER_FLEET_API)
 
         # Build Tesla provider choices
         tesla_providers = {
@@ -1182,10 +1325,7 @@ class Teslav1rOptionsFlow(config_entries.OptionsFlow):
                         default=current_tesla_provider,
                     ): SelectSelector(
                         SelectSelectorConfig(
-                            options=[
-                                SelectOptionDict(value=k, label=v)
-                                for k, v in tesla_providers.items()
-                            ],
+                            options=[SelectOptionDict(value=k, label=v) for k, v in tesla_providers.items()],
                             mode=SelectSelectorMode.DROPDOWN,
                         )
                     ),

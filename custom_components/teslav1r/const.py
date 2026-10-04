@@ -199,9 +199,7 @@ FLEET_API_AUTH_URL = "https://auth.tesla.com/oauth2/v3"
 FLEET_API_TOKEN_URL = "https://auth.tesla.com/oauth2/v3/token"
 
 
-def get_tesla_api_base_url(
-    provider: str | None, fleet_base_url: str | None = None
-) -> str:
+def get_tesla_api_base_url(provider: str | None, fleet_base_url: str | None = None) -> str:
     """Return the Tesla API base URL for a given provider.
 
     Used by all Tesla service handlers to construct API request URLs.
@@ -406,11 +404,7 @@ def normalize_grid_charge_blackout_windows(value) -> list[dict[str, str]]:
         if not isinstance(start, str) or not isinstance(end, str):
             raise TypeError("blackout times must be strings")
         for clock in (start, end):
-            if (
-                len(clock) != 5
-                or clock[2] != ":"
-                or not (clock[:2].isdigit() and clock[3:].isdigit())
-            ):
+            if len(clock) != 5 or clock[2] != ":" or not (clock[:2].isdigit() and clock[3:].isdigit()):
                 raise ValueError("blackout times must use HH:MM")
             hour, minute = int(clock[:2]), int(clock[3:])
             if hour > 23 or minute > 59:
@@ -455,9 +449,7 @@ SENSOR_TYPE_OPTIMIZATION_STATUS = "optimization_status"
 SENSOR_TYPE_OPTIMIZATION_SAVINGS = "optimization_savings"
 SENSOR_TYPE_OPTIMIZATION_NEXT_ACTION = "optimization_next_action"
 SENSOR_TYPE_OPTIMIZATION_FORCE_CHARGE_WINDOWS = "optimization_force_charge_windows"
-SENSOR_TYPE_OPTIMIZATION_FORCE_DISCHARGE_WINDOWS = (
-    "optimization_force_discharge_windows"
-)
+SENSOR_TYPE_OPTIMIZATION_FORCE_DISCHARGE_WINDOWS = "optimization_force_discharge_windows"
 
 
 # ============================================================

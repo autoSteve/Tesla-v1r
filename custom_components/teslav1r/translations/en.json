@@ -1,69 +1,137 @@
 {
   "config": {
+    "abort": {
+      "already_configured": "Tesla v1r is already configured. To change settings, use the Configure button on the integration card.",
+      "monitoring_cleanup_failed": "Monitoring Mode was not enabled because Tesla v1r could not safely release its current battery control. Check the logs and try again.",
+      "no_energy_sites": "No Tesla energy sites found. Ensure you have a Powerwall or Solar system set up in the Tesla app before adding Tesla v1r.",
+      "reauth_failed": "Re-authentication failed. Remove the integration and set it up again.",
+      "reauth_fleet_api_use_tesla_fleet": "Tesla v1r reads tokens from your Tesla Fleet integration. Go to Settings > Devices & Services > Tesla Fleet and re-authenticate there. Tesla v1r will pick up the new tokens automatically.",
+      "reauth_successful": "Token updated -- Tesla v1r is reconnected."
+    },
+    "error": {
+      "cannot_connect": "Cannot reach the API server. Check your internet connection and that Home Assistant has outbound HTTPS access.",
+      "captcha_required": "GloBird requested captcha verification. Sign in through the GloBird portal in a browser, then try again.",
+      "invalid_auth": "Token rejected by the API -- check you copied the full token string with no extra spaces.",
+      "invalid_display_currency": "Select Automatic, AUD, EUR, GBP, NZD, or SEK.",
+      "invalid_flow_power_plan": "Choose a Flow Power plan and a region supported by that plan.",
+      "invalid_globird_auth": "Email or password is incorrect. Check your GloBird portal login credentials.",
+      "invalid_postcode": "Enter a valid four-digit Australian postcode.",
+      "invalid_time": "Enter a valid 24-hour time in HH:MM format.",
+      "no_energy_sites": "No Tesla energy sites found. Ensure your Powerwall or Solar system is set up in the Tesla app before continuing.",
+      "no_sites": "No Amber sites found for this token. Verify the token belongs to an account with an active Amber site.",
+      "no_token_provided": "Paste a token in the field above. See the hint text for where to find it.",
+      "powerwall_gateway_invalid": "Enter a bare Powerwall IP/hostname or an HTTP(S) URL without credentials, a path, query, or invalid port.",
+      "season_month_gap": "Tariff seasons must cover all 12 months before continuing.",
+      "season_month_invalid": "Choose valid start and end months for the tariff season.",
+      "season_month_overlap": "Tariff seasons overlap. Each month can belong to only one season.",
+      "season_name_invalid": "Each tariff season needs a unique, non-empty name.",
+      "season_required": "Add at least one tariff season.",
+      "tesla_fleet_not_installed": "Tesla Fleet integration is not installed in Home Assistant. Add it from Settings > Devices & Services > Add Integration > Tesla Fleet, then return here.",
+      "tesla_force_discharge_prices_invalid": "Enter finite Tesla force-discharge prices from $0 to $99/kWh, with the sell price higher than the buy price.",
+      "unknown": "An unexpected error occurred. Check the Home Assistant logs for details and try again."
+    },
     "step": {
-      "user": {
-        "title": "Tesla v1r setup",
-        "description": "Configure Tesla v1r to sync electricity pricing to your battery system automatically.",
-        "submit": "Next"
-      },
-      "provider_selection": {
-        "title": "Electricity provider",
-        "description": "Select your electricity retailer. Tesla v1r will fetch pricing and sync it to your battery on a 5-minute cycle.",
+      "battery_management_mode": {
         "data": {
-          "electricity_provider": "Electricity provider"
+          "battery_management_mode": "Management mode",
+          "optimization_backup_reserve": "Minimum discharge level (%)"
         },
         "data_description": {
-          "electricity_provider": "If your retailer is not listed, choose Other / Custom TOU to enter rates manually."
+          "battery_management_mode": "Manual = Tesla v1r automations control charge/discharge. TOU Sync = prices synced to battery's built-in scheduler. Smart Optimization = LP solver minimises costs.",
+          "optimization_backup_reserve": "Intentional battery export stops at this level. Natural self-consumption may continue to the separate hardware backup reserve."
         },
-        "submit": "Next"
+        "description": "Choose how Tesla v1r manages your battery.",
+        "submit": "Next",
+        "title": "Battery management mode"
       },
       "battery_system": {
-        "title": "Battery system",
-        "description": "Select the battery or hybrid inverter installed at your site. This determines which connection protocol Tesla v1r uses.",
         "data": {
           "battery_system": "Battery system"
         },
         "data_description": {
           "battery_system": "If you have multiple battery brands, choose the primary system that Tesla v1r should control."
         },
-        "submit": "Next"
+        "description": "Select the battery or hybrid inverter installed at your site. This determines which connection protocol Tesla v1r uses.",
+        "submit": "Next",
+        "title": "Battery system"
       },
       "custom_battery": {
-        "title": "Custom external controller",
-        "description": "Select the Home Assistant entities Tesla v1r should use to model your battery system. Tesla v1r will generate optimizer plans in monitoring mode and will not send control commands.",
         "data": {
           "custom_battery_level_entity": "Battery level sensor",
           "custom_battery_power_entity": "Battery power sensor",
           "custom_grid_power_entity": "Grid power sensor",
-          "custom_solar_power_entity": "Solar power sensor",
           "custom_load_power_entity": "Home load sensor",
+          "custom_solar_power_entity": "Solar power sensor",
+          "optimization_allow_grid_charge": "Allow grid charging",
           "optimization_backup_reserve": "Minimum discharge level",
           "optimization_battery_capacity_wh": "Battery capacity",
           "optimization_max_charge_w": "Maximum charge power",
           "optimization_max_discharge_w": "Maximum discharge power",
           "optimization_max_grid_export_w": "Maximum grid export",
-          "optimization_max_grid_import_w": "Maximum grid import",
-          "optimization_allow_grid_charge": "Allow grid charging"
+          "optimization_max_grid_import_w": "Maximum grid import"
         },
         "data_description": {
           "custom_battery_level_entity": "State of charge as a percentage.",
           "custom_battery_power_entity": "Battery power. Positive means discharging; negative means charging.",
           "custom_grid_power_entity": "Grid power. Positive means importing; negative means exporting.",
-          "custom_solar_power_entity": "Current solar production.",
           "custom_load_power_entity": "Current total home/site load.",
+          "custom_solar_power_entity": "Current solar production.",
+          "optimization_allow_grid_charge": "When disabled, the planner will not schedule forced grid charging.",
           "optimization_backup_reserve": "The optimizer will never plan discharge below this percentage.",
           "optimization_battery_capacity_wh": "Total usable battery capacity in kWh for the external battery system.",
           "optimization_max_charge_w": "Maximum charge power in kW that the planner may schedule.",
           "optimization_max_discharge_w": "Maximum battery/inverter discharge power in kW that the planner may schedule for loads and export.",
           "optimization_max_grid_export_w": "Site/DNSP export cap in kW. Auto-detected only when your inverter reports its own export limit; otherwise Profit Max solar export stays off until you set this. Set 0 for zero-export sites. This does not limit battery power used by house loads.",
-          "optimization_max_grid_import_w": "Maximum site grid import in kW. Set 0 for no site import cap.",
-          "optimization_allow_grid_charge": "When disabled, the planner will not schedule forced grid charging."
+          "optimization_max_grid_import_w": "Maximum site grid import in kW. Set 0 for no site import cap."
         },
-        "submit": "Save"
+        "description": "Select the Home Assistant entities Tesla v1r should use to model your battery system. Tesla v1r will generate optimizer plans in monitoring mode and will not send control commands.",
+        "submit": "Save",
+        "title": "Custom external controller"
+      },
+      "optimization_provider": {
+        "data": {
+          "optimization_provider": "Optimization mode"
+        },
+        "data_description": {
+          "optimization_provider": "Smart Optimization generally delivers lower bills but requires the HiGHS solver (highspy). The native mode is simpler and uses your battery's own scheduling logic."
+        },
+        "description": "Choose how Tesla v1r schedules your battery. The built-in option uses your {battery_name}'s native TOU scheduler; Smart Optimization runs a cost-minimising LP solver inside Tesla v1r.",
+        "submit": "Next",
+        "title": "Optimization mode"
+      },
+      "provider_selection": {
+        "data": {
+          "electricity_provider": "Electricity provider"
+        },
+        "data_description": {
+          "electricity_provider": "If your retailer is not listed, choose Other / Custom TOU to enter rates manually."
+        },
+        "description": "Select your electricity retailer. Tesla v1r will fetch pricing and sync it to your battery on a 5-minute cycle.",
+        "submit": "Next",
+        "title": "Electricity provider"
+      },
+      "site_selection": {
+        "data": {
+          "amber_forecast_type": "Amber price forecast",
+          "amber_site_id": "Amber site",
+          "auto_sync_enabled": "Sync TOU schedule automatically",
+          "battery_curtailment_enabled": "Enable battery export curtailment",
+          "powerwall_local_ip": "Powerwall gateway IP address",
+          "tesla_energy_site_id": "Tesla energy site"
+        },
+        "data_description": {
+          "amber_forecast_type": "Predicted is balanced. Low assumes cheaper prices (more aggressive charging). High assumes expensive prices (more conservative).",
+          "amber_site_id": "If you have multiple Amber NMIs, select the one associated with this Powerwall.",
+          "auto_sync_enabled": "When enabled, Tesla v1r uploads a new TOU tariff schedule to your battery every 5 minutes based on current Amber prices.",
+          "battery_curtailment_enabled": "Stop battery export when earnings fall below the configured threshold. This controls the battery/Tesla path only; supported DC solar curtailment has its own opt-in.",
+          "powerwall_local_ip": "Optional. Provides direct LAN access for live local polling and fast gateway writes \u2014 pairing handles authentication via RSA signing, no password required.",
+          "tesla_energy_site_id": "The Powerwall or Solar site that Tesla v1r will control. If you have multiple Tesla sites, choose the one at this address."
+        },
+        "description": "Match your Tesla energy site with your electricity account. If you only have one of each, they are pre-selected.",
+        "submit": "Finish",
+        "title": "Select your sites"
       },
       "tesla_provider": {
-        "title": "Tesla API connection",
-        "description": "{fleet_detected}\n\nChoose Tesla API providers and the temporary buy/sell rates used during Powerwall force discharge.",
         "data": {
           "tesla_api_provider": "Powerwall API provider",
           "tesla_ev_api_provider": "Vehicle API provider",
@@ -76,213 +144,96 @@
           "tesla_force_discharge_buy_price": "Temporary Tesla import price during force discharge. Defaults to $0.55/kWh; this is a control signal, not your retail tariff.",
           "tesla_force_discharge_sell_price": "Temporary Tesla export price during force discharge. Defaults to $25.00/kWh and must exceed the buy price; this is a control signal, not your feed-in tariff."
         },
-        "submit": "Next"
+        "description": "{fleet_detected}\n\nChoose Tesla API providers and the temporary buy/sell rates used during Powerwall force discharge.",
+        "submit": "Next",
+        "title": "Tesla API connection"
       },
-      "site_selection": {
-        "title": "Select your sites",
-        "description": "Match your Tesla energy site with your electricity account. If you only have one of each, they are pre-selected.",
-        "data": {
-          "tesla_energy_site_id": "Tesla energy site",
-          "powerwall_local_ip": "Powerwall gateway IP address",
-          "amber_site_id": "Amber site",
-          "auto_sync_enabled": "Sync TOU schedule automatically",
-          "amber_forecast_type": "Amber price forecast",
-          "battery_curtailment_enabled": "Enable battery export curtailment"
-        },
-        "data_description": {
-          "tesla_energy_site_id": "The Powerwall or Solar site that Tesla v1r will control. If you have multiple Tesla sites, choose the one at this address.",
-          "powerwall_local_ip": "Optional. Provides direct LAN access for live local polling and fast gateway writes — pairing handles authentication via RSA signing, no password required.",
-          "amber_site_id": "If you have multiple Amber NMIs, select the one associated with this Powerwall.",
-          "auto_sync_enabled": "When enabled, Tesla v1r uploads a new TOU tariff schedule to your battery every 5 minutes based on current Amber prices.",
-          "amber_forecast_type": "Predicted is balanced. Low assumes cheaper prices (more aggressive charging). High assumes expensive prices (more conservative).",
-          "battery_curtailment_enabled": "Stop battery export when earnings fall below the configured threshold. This controls the battery/Tesla path only; supported DC solar curtailment has its own opt-in."
-        },
-        "submit": "Finish"
-      },
-      "battery_management_mode": {
-        "title": "Battery management mode",
-        "description": "Choose how Tesla v1r manages your battery.",
-        "data": {
-          "battery_management_mode": "Management mode",
-          "optimization_backup_reserve": "Minimum discharge level (%)"
-        },
-        "data_description": {
-          "battery_management_mode": "Manual = Tesla v1r automations control charge/discharge. TOU Sync = prices synced to battery's built-in scheduler. Smart Optimization = LP solver minimises costs.",
-          "optimization_backup_reserve": "Intentional battery export stops at this level. Natural self-consumption may continue to the separate hardware backup reserve."
-        },
-        "submit": "Next"
+      "user": {
+        "description": "Configure Tesla v1r to sync electricity pricing to your battery system automatically.",
+        "submit": "Next",
+        "title": "Tesla v1r setup"
       }
-    },
-    "error": {
-      "tesla_force_discharge_prices_invalid": "Enter finite Tesla force-discharge prices from $0 to $99/kWh, with the sell price higher than the buy price.",
-      "invalid_flow_power_plan": "Choose a Flow Power plan and a region supported by that plan.",
-      "invalid_display_currency": "Select Automatic, AUD, EUR, GBP, NZD, or SEK.",
-      "season_required": "Add at least one tariff season.",
-      "season_name_invalid": "Each tariff season needs a unique, non-empty name.",
-      "season_month_invalid": "Choose valid start and end months for the tariff season.",
-      "season_month_overlap": "Tariff seasons overlap. Each month can belong to only one season.",
-      "season_month_gap": "Tariff seasons must cover all 12 months before continuing.",
-      "invalid_auth": "Token rejected by the API -- check you copied the full token string with no extra spaces.",
-      "cannot_connect": "Cannot reach the API server. Check your internet connection and that Home Assistant has outbound HTTPS access.",
-      "invalid_globird_auth": "Email or password is incorrect. Check your GloBird portal login credentials.",
-      "captcha_required": "GloBird requested captcha verification. Sign in through the GloBird portal in a browser, then try again.",
-      "no_sites": "No Amber sites found for this token. Verify the token belongs to an account with an active Amber site.",
-      "no_energy_sites": "No Tesla energy sites found. Ensure your Powerwall or Solar system is set up in the Tesla app before continuing.",
-      "no_token_provided": "Paste a token in the field above. See the hint text for where to find it.",
-      "tesla_fleet_not_installed": "Tesla Fleet integration is not installed in Home Assistant. Add it from Settings > Devices & Services > Add Integration > Tesla Fleet, then return here.",
-      "powerwall_gateway_invalid": "Enter a bare Powerwall IP/hostname or an HTTP(S) URL without credentials, a path, query, or invalid port.",
-      "invalid_device_id": "Device ID must be exactly 13 digits. Leave blank if your account does not require one.",
-      "invalid_time": "Enter a valid 24-hour time in HH:MM format.",
-      "invalid_postcode": "Enter a valid four-digit Australian postcode.",
-      "unknown": "An unexpected error occurred. Check the Home Assistant logs for details and try again."
-    },
-    "abort": {
-      "already_configured": "Tesla v1r is already configured. To change settings, use the Configure button on the integration card.",
-      "no_energy_sites": "No Tesla energy sites found. Ensure you have a Powerwall or Solar system set up in the Tesla app before adding Tesla v1r.",
-      "reauth_successful": "Token updated -- Tesla v1r is reconnected.",
-      "reauth_failed": "Re-authentication failed. Remove the integration and set it up again.",
-      "reauth_fleet_api_use_tesla_fleet": "Tesla v1r reads tokens from your Tesla Fleet integration. Go to Settings > Devices & Services > Tesla Fleet and re-authenticate there. Tesla v1r will pick up the new tokens automatically.",
-      "monitoring_cleanup_failed": "Monitoring Mode was not enabled because Tesla v1r could not safely release its current battery control. Check the logs and try again."
-    }
-  },
-  "options": {
-    "error": {
-      "tesla_force_discharge_prices_invalid": "Enter finite Tesla force-discharge prices from $0 to $99/kWh, with the sell price higher than the buy price.",
-      "invalid_flow_power_plan": "Choose a Flow Power plan and a region supported by that plan.",
-      "season_required": "Add at least one tariff season.",
-      "season_name_invalid": "Each tariff season needs a unique, non-empty name.",
-      "season_month_invalid": "Choose valid start and end months for the tariff season.",
-      "season_month_overlap": "Tariff seasons overlap. Each month can belong to only one season.",
-      "season_month_gap": "Tariff seasons must cover all 12 months before continuing.",
-      "cannot_connect": "Cannot reach the provider portal. Check your internet connection and that Home Assistant has outbound HTTPS access.",
-      "invalid_ai_summary_settings": "Choose either Clear saved provider key or enter a replacement key, not both.",
-      "invalid_grid_charge_blackout_windows": "Enter one or more valid HH:MM blackout ranges with different start and end times.",
-      "powerwall_gateway_invalid": "Enter a bare Powerwall IP/hostname or an HTTP(S) URL without credentials, a path, query, or invalid port.",
-      "battery_integration_source_mismatch": "The selected integration does not match this connection method.",
-      "battery_integration_missing_telemetry": "The selected integration does not currently expose all required battery SOC, battery power, grid power, solar power, and home load sensors.",
-      "unknown": "An unexpected error occurred. Check the Home Assistant logs for details and try again.",
-      "invalid_phase_load_management": "These phase-load management settings are not usable. The reason is shown above the form.",
-      "storage_unavailable": "Tesla v1r storage is not available. Reload the integration and try again."
-    },
-    "step": {
-      "init": {
-        "title": "Tesla v1r settings",
-        "description": "Settings are grouped for your selected battery, provider, and EV setup. Optional specialist features are under Advanced settings.",
-        "menu_options": {
-          "display_currency": "Display currency",
-          "pricing": "Electricity pricing & provider",
-          "battery_system": "Change battery / control method",
-          "battery_connection_profile": "Battery connection method & sensors",
-          "provider_portal": "Provider portal login",
-          "tesla_connection": "Tesla API connection",
-          "advanced": "Advanced settings"
-        }
-      },
-      "display_currency": {
-        "title": "Display currency",
-        "description": "Choose how Tesla v1r labels user-facing monetary amounts. Automatic keeps current provider and Home Assistant behavior. Tesla v1r never converts provider prices, tariff data, history, billing, or optimizer calculations; a different source currency safely remains in its native unit.",
-        "data": {
-          "display_currency": "Display currency"
-        },
-        "data_description": {
-          "display_currency": "Select Automatic, AUD, EUR, GBP, NZD, or SEK. A selected currency is shown only when the authoritative source already uses it."
-        },
-        "submit": "Save"
-      },
-      "tesla_connection": {
-        "title": "Tesla API connection",
-        "description": "Update Tesla API providers and the temporary buy/sell rates Tesla v1r uploads during Powerwall force discharge. Rates apply to the next force-discharge session.",
-        "data": {
-          "tesla_api_provider": "Powerwall API provider",
-          "tesla_ev_api_provider": "Vehicle API provider",
-          "powerwall_local_ip": "Powerwall gateway IP address",
-          "tesla_force_discharge_buy_price": "Force-discharge buy price ($/kWh)",
-          "tesla_force_discharge_sell_price": "Force-discharge sell price ($/kWh)",
-          "update_teslemetry_token": "New API token (leave blank to keep current)"
-        },
-        "data_description": {
-          "tesla_api_provider": "Controls how Tesla v1r reads and writes your Powerwall TOU schedule. Tesla v1r.cc is free and handles OAuth for you.",
-          "tesla_ev_api_provider": "Only needed if you want Tesla v1r to send commands to a Tesla vehicle (e.g. start/stop charging). Choose None if you only have a Powerwall or use BLE.",
-          "powerwall_local_ip": "Optional. Provides direct LAN access for live local polling and fast gateway writes — pairing handles authentication via RSA signing, no password required.",
-          "tesla_force_discharge_buy_price": "Temporary Tesla import price during force discharge. Defaults to $0.55/kWh; this is a control signal, not your retail tariff.",
-          "tesla_force_discharge_sell_price": "Temporary Tesla export price during force discharge. Defaults to $25.00/kWh and must exceed the buy price; this is a control signal, not your feed-in tariff.",
-          "update_teslemetry_token": "Paste a new token to rotate it. Leave blank to keep your existing token."
-        },
-        "submit": "Save"
-      },
-      "init_tesla": {
-        "title": "Tesla Powerwall settings",
-        "description": "Configure pricing and Tesla API providers.",
-        "data": {
-          "electricity_provider": "Electricity provider",
-          "tesla_api_provider": "Tesla Energy API provider",
-          "tesla_ev_api_provider": "Tesla EV API provider"
-        },
-        "submit": "Save"
-      }
-    }
-  },
-  "issues": {
-    "tesla_fleet_api_use_tesla_fleet": {
-      "title": "Tesla v1r reads tokens from your Tesla Fleet integration",
-      "description": "Go to Settings > Devices & Services > Tesla Fleet and re-authenticate there. Tesla v1r will pick up the new tokens automatically."
     }
   },
   "entity": {
     "sensor": {
-      "current_price": {
-        "name": "Current Electricity Price"
-      },
-      "solar_power": {
-        "name": "Solar Power"
-      },
-      "grid_power": {
-        "name": "Grid Power"
-      },
-      "network_export_limit": {
-        "name": "Network Export Limit"
-      },
-      "battery_power": {
-        "name": "Battery Power"
-      },
-      "home_load": {
-        "name": "Home Load"
-      },
-      "battery_level": {
-        "name": "Battery Level"
-      },
-      "grid_import_power": {
-        "name": "Grid Import Power"
-      },
-      "in_demand_charge_period": {
-        "name": "In Demand Charge Period"
-      },
-      "peak_demand_this_cycle": {
-        "name": "Peak Demand This Cycle"
-      },
-      "demand_charge_cost": {
-        "name": "Demand Charge Cost This Month"
-      },
-      "days_until_demand_reset": {
-        "name": "Days Until Demand Reset"
-      },
       "aemo_price": {
         "name": "AEMO Wholesale Price"
       },
       "aemo_spike_status": {
         "name": "AEMO Spike Status"
       },
-      "tariff_schedule": {
-        "name": "Tariff Schedule"
+      "amber_usage_month_cost": {
+        "name": "Month To Date Billed Cost"
       },
-      "flow_power_price": {
-        "name": "Flow Power Import Price"
+      "amber_usage_month_savings": {
+        "name": "Month To Date Battery Savings"
+      },
+      "amber_usage_today_cost": {
+        "name": "Today Metered Cost"
+      },
+      "amber_usage_yesterday_cost": {
+        "name": "Yesterday Billed Cost"
+      },
+      "amber_usage_yesterday_savings": {
+        "name": "Yesterday Battery Savings"
+      },
+      "battery_level": {
+        "name": "Battery Level"
+      },
+      "battery_power": {
+        "name": "Battery Power"
+      },
+      "current_price": {
+        "name": "Current Electricity Price"
+      },
+      "days_until_demand_reset": {
+        "name": "Days Until Demand Reset"
+      },
+      "demand_charge_cost": {
+        "name": "Demand Charge Cost This Month"
+      },
+      "flow_power_amber_comparison": {
+        "name": "Flow Power Amber Comparison"
       },
       "flow_power_export_price": {
         "name": "Flow Power Export Price"
       },
+      "flow_power_network_tariff": {
+        "name": "Flow Power Network Tariff"
+      },
+      "flow_power_price": {
+        "name": "Flow Power Import Price"
+      },
+      "flow_power_twap": {
+        "name": "Flow Power TWAP 30-Day Average"
+      },
+      "grid_import_power": {
+        "name": "Grid Import Power"
+      },
+      "grid_power": {
+        "name": "Grid Power"
+      },
+      "home_load": {
+        "name": "Home Load"
+      },
+      "in_demand_charge_period": {
+        "name": "In Demand Charge Period"
+      },
       "inverter_status": {
         "name": "Inverter Status"
+      },
+      "network_export_limit": {
+        "name": "Network Export Limit"
+      },
+      "peak_demand_this_cycle": {
+        "name": "Peak Demand This Cycle"
+      },
+      "solar_power": {
+        "name": "Solar Power"
+      },
+      "solcast_current_estimate": {
+        "name": "Solar Current Estimate"
       },
       "solcast_today_forecast": {
         "name": "Solar Forecast Today"
@@ -290,23 +241,8 @@
       "solcast_tomorrow_forecast": {
         "name": "Solar Forecast Tomorrow"
       },
-      "solcast_current_estimate": {
-        "name": "Solar Current Estimate"
-      },
-      "amber_usage_yesterday_cost": {
-        "name": "Yesterday Billed Cost"
-      },
-      "amber_usage_today_cost": {
-        "name": "Today Metered Cost"
-      },
-      "amber_usage_yesterday_savings": {
-        "name": "Yesterday Battery Savings"
-      },
-      "amber_usage_month_cost": {
-        "name": "Month To Date Billed Cost"
-      },
-      "amber_usage_month_savings": {
-        "name": "Month To Date Battery Savings"
+      "tariff_schedule": {
+        "name": "Tariff Schedule"
       }
     },
     "switch": {
@@ -315,14 +251,166 @@
       }
     }
   },
-  "services": {
-    "sync_tou_schedule": {
-      "name": "Sync TOU Schedule",
-      "description": "Manually refresh Time-of-Use tariff prices. Tesla systems upload the schedule; Modbus systems store it for Tesla v1r display and optimization."
+  "issues": {
+    "covau_plan_withdrawn": {
+      "description": "AER plan {plan_id} was withdrawn on {withdrawn_date}. Tesla v1r will keep using the cached immutable snapshot and will not move you to a successor automatically. Open Configure > Electricity pricing and confirm the exact plan on your current bill, or enter the validated manual tariff.",
+      "title": "CovaU SolarMax plan snapshot has been withdrawn"
     },
+    "flow_power_web_data_api_required": {
+      "description": "Flow Power has retired automated customer-portal access. Your portal credentials and session cookies were removed. In the Flow Power app, go to **More > Web Data Access**, copy the API key, then open **Settings > Devices & Services > Tesla v1r > Configure > Electricity pricing & provider** and enter it. AEMO-direct pricing continues while the key is missing, but Flow Power API prices and account metrics are unavailable.",
+      "title": "Flow Power Web Data API key required"
+    },
+    "solar_export_limit_not_configured": {
+      "description": "Profit Max can hold battery charging so high-priced solar exports instead, but it needs to know your site export cap first. Your battery connection does not report one, so Tesla v1r cannot auto-detect it. Open **Settings > Devices & Services > Tesla v1r > Configure > Smart Optimization > Grid & site constraints** and set **Maximum grid export** to your site/DNSP export cap in kW (for example 5 for a 5 kW limit). Until then every candidate slot falls back to self-consumption.",
+      "title": "Set your maximum grid export for Profit Max solar export"
+    }
+  },
+  "options": {
+    "error": {
+      "battery_integration_missing_telemetry": "The selected integration does not currently expose all required battery SOC, battery power, grid power, solar power, and home load sensors.",
+      "battery_integration_source_mismatch": "The selected integration does not match this connection method.",
+      "battery_integration_source_required": "Select the Home Assistant integration entry that owns this battery, or choose the required Sungrow anchor sensor.",
+      "cannot_connect": "Cannot reach the provider portal. Check your internet connection and that Home Assistant has outbound HTTPS access.",
+      "invalid_ai_summary_settings": "Choose either Clear saved provider key or enter a replacement key, not both.",
+      "invalid_connection_profile": "Select a connection method supported by this battery system.",
+      "invalid_flow_power_plan": "Choose a Flow Power plan and a region supported by that plan.",
+      "invalid_grid_charge_blackout_windows": "Enter one or more valid HH:MM blackout ranges with different start and end times.",
+      "powerwall_gateway_invalid": "Enter a bare Powerwall IP/hostname or an HTTP(S) URL without credentials, a path, query, or invalid port.",
+      "season_month_gap": "Tariff seasons must cover all 12 months before continuing.",
+      "season_month_invalid": "Choose valid start and end months for the tariff season.",
+      "season_month_overlap": "Tariff seasons overlap. Each month can belong to only one season.",
+      "season_name_invalid": "Each tariff season needs a unique, non-empty name.",
+      "season_required": "Add at least one tariff season.",
+      "storage_unavailable": "Tesla v1r storage is not available. Reload the integration and try again.",
+      "tesla_force_discharge_prices_invalid": "Enter finite Tesla force-discharge prices from $0 to $99/kWh, with the sell price higher than the buy price.",
+      "unknown": "An unexpected error occurred. Check the Home Assistant logs for details and try again."
+    },
+    "step": {
+      "advanced": {
+        "description": "Optional features for specialist tariffs, export controls, extra inverters, forecasting, and maintenance. You can safely leave these alone unless they apply to your setup.",
+        "menu_options": {
+          "auto_update": "Tesla v1r auto-update",
+          "back": "Back to Tesla v1r settings"
+        },
+        "title": "Advanced settings"
+      },
+      "battery_connection_profile": {
+        "data": {
+          "battery_connection_profile": "Connection method",
+          "battery_integration_config_entry_id": "Home Assistant integration",
+          "battery_sensor_display_mode": "Additional sensors"
+        },
+        "data_description": {
+          "battery_connection_profile": "Only validated bundles are offered. Existing installations keep their current method until changed here.",
+          "battery_integration_config_entry_id": "Select the exact upstream integration entry for this physical installation.",
+          "battery_sensor_display_mode": "Recommended shows high-value battery, solar, grid, energy and status entities. All supported includes every sensor in the selected source scope."
+        },
+        "description": "Choose the single route Tesla v1r should use for telemetry and control. Home Assistant monitoring-only methods open no Tesla v1r hardware connection. Current control coverage: {controls}",
+        "submit": "Save",
+        "title": "Battery connection method & sensors"
+      },
+      "battery_connection_profile_setup": {
+        "data": {
+          "battery_connection_profile": "Connection method",
+          "battery_integration_config_entry_id": "Home Assistant integration",
+          "battery_sensor_display_mode": "Additional sensors"
+        },
+        "data_description": {
+          "battery_connection_profile": "Only connection bundles validated for the selected battery are offered.",
+          "battery_integration_config_entry_id": "Select the exact upstream integration entry for this physical installation.",
+          "battery_sensor_display_mode": "Recommended shows useful battery, solar, grid, energy and status values without duplicating recorder entities."
+        },
+        "description": "Choose the single route Tesla v1r should use. Monitoring-only Home Assistant methods open no Tesla v1r hardware connection and require five fresh core telemetry sensors.",
+        "submit": "Next",
+        "title": "Battery connection method & sensors"
+      },
+      "battery_system": {
+        "data": {
+          "battery_system": "Battery / control method"
+        },
+        "data_description": {
+          "battery_system": "Choose the primary battery, inverter, or external controller Tesla v1r should use."
+        },
+        "description": "Change the battery or hybrid inverter that Tesla v1r controls. Choosing the current method returns to settings; choose its separate connection page to edit API or device settings. A new method opens its connection page, and the integration reloads after those settings are saved.",
+        "submit": "Next",
+        "title": "Battery / control method"
+      },
+      "custom_battery": {
+        "data": {
+          "custom_battery_level_entity": "Battery level sensor",
+          "custom_battery_power_entity": "Battery power sensor",
+          "custom_grid_power_entity": "Grid power sensor",
+          "custom_load_power_entity": "Home load sensor",
+          "custom_solar_power_entity": "Solar power sensor",
+          "optimization_allow_grid_charge": "Allow grid charging",
+          "optimization_backup_reserve": "Minimum discharge level",
+          "optimization_battery_capacity_wh": "Battery capacity",
+          "optimization_max_charge_w": "Maximum charge power",
+          "optimization_max_discharge_w": "Maximum discharge power",
+          "optimization_max_grid_export_w": "Maximum grid export",
+          "optimization_max_grid_import_w": "Maximum grid import"
+        },
+        "description": "Select the Home Assistant entities Tesla v1r should use to model your battery system. Tesla v1r will generate optimizer plans in monitoring mode and will not send control commands.",
+        "submit": "Save",
+        "title": "Custom external controller"
+      },
+      "display_currency": {
+        "data": {
+          "display_currency": "Display currency"
+        },
+        "data_description": {
+          "display_currency": "Select Automatic, AUD, EUR, GBP, NZD, or SEK. A selected currency is shown only when the authoritative source already uses it."
+        },
+        "description": "Choose how Tesla v1r labels user-facing monetary amounts. Automatic keeps current provider and Home Assistant behavior. Tesla v1r never converts provider prices, tariff data, history, billing, or optimizer calculations; a different source currency safely remains in its native unit.",
+        "submit": "Save",
+        "title": "Display currency"
+      },
+      "init": {
+        "description": "Settings are grouped for your selected battery, provider, and EV setup. Optional specialist features are under Advanced settings.",
+        "menu_options": {
+          "advanced": "Advanced settings",
+          "battery_connection_profile": "Battery connection method & sensors",
+          "battery_system": "Change battery / control method",
+          "custom_battery": "Custom external controller",
+          "display_currency": "Display currency",
+          "pricing": "Electricity pricing & provider",
+          "provider_portal": "Provider portal login",
+          "tesla_connection": "Tesla API connection"
+        },
+        "title": "Tesla v1r settings"
+      },
+      "init_tesla": {
+        "data": {
+          "electricity_provider": "Electricity provider",
+          "tesla_api_provider": "Tesla Energy API provider"
+        },
+        "description": "Configure pricing and Tesla API providers.",
+        "submit": "Save",
+        "title": "Tesla Powerwall settings"
+      },
+      "tesla_connection": {
+        "data": {
+          "powerwall_local_ip": "Powerwall gateway IP address",
+          "tesla_api_provider": "Powerwall API provider"
+        },
+        "data_description": {
+          "powerwall_local_ip": "Provides direct LAN access for live local polling and fast gateway writes \u2014 pairing handles authentication via RSA signing, no password required.",
+          "tesla_api_provider": "Controls how Tesla v1r reads and writes your Powerwall TOU schedule. Tesla Fleet is free."
+        },
+        "description": "Update Tesla API providers and the temporary buy/sell rates Tesla v1r uploads during Powerwall force discharge. Rates apply to the next force-discharge session.",
+        "submit": "Save",
+        "title": "Tesla API connection"
+      }
+    }
+  },
+  "services": {
     "sync_now": {
-      "name": "Sync Now",
-      "description": "Immediately refresh data from Amber and Tesla"
+      "description": "Immediately refresh data from Amber and Tesla",
+      "name": "Sync Now"
+    },
+    "sync_tou_schedule": {
+      "description": "Manually refresh Time-of-Use tariff prices. Tesla systems upload the schedule; Modbus systems store it for Tesla v1r display and optimization.",
+      "name": "Sync TOU Schedule"
     }
   }
 }

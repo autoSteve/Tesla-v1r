@@ -1,23 +1,86 @@
 """The Tesla v1r integration."""
 
 import asyncio
-import copy
-import logging
-import time
 from collections.abc import Callable
+import copy
 from datetime import datetime, timedelta, timezone
+import json
+import logging
+import re
+import time
 from typing import Any
 
 import aiohttp
+from aiohttp import web
+
+from homeassistant.config_entries import ConfigEntry, ConfigEntryState
+from homeassistant.const import CONF_ACCESS_TOKEN, CONF_TOKEN, Platform
+from homeassistant.core import HomeAssistant, ServiceCall, SupportsResponse
+from homeassistant.exceptions import ConfigEntryNotReady, HomeAssistantError
+from homeassistant.helpers import device_registry as dr
+from homeassistant.helpers.aiohttp_client import async_get_clientsession
+import homeassistant.helpers.config_validation as cv
+from homeassistant.helpers.dispatcher import (
+    async_dispatcher_send,
+)
+from homeassistant.helpers.storage import Store
 from homeassistant.util import dt as dt_util
 
+from .automations.live_status import coordinator_data_to_live_status
+from .battery_backend.profiles import resolve_connection_profile
+from .const import (
+    BATTERY_SYSTEM_CUSTOM,
+    CONF_BATTERY_CURTAILMENT_ENABLED,
+    # Battery system selection
+    CONF_BATTERY_SYSTEM,
+    CONF_DEMAND_ALLOW_GRID_CHARGING,
+    CONF_FLEET_API_ACCESS_TOKEN,
+    CONF_FLEET_API_BASE_URL,
+    CONF_FLEET_API_CLIENT_ID,
+    CONF_FLEET_API_CLIENT_SECRET,
+    CONF_FLEET_API_REFRESH_TOKEN,
+    CONF_FLEET_API_TOKEN_EXPIRES_AT,
+    CONF_HARDWARE_BACKUP_RESERVE,
+    CONF_OPTIMIZATION_BACKUP_RESERVE,
+    CONF_OPTIMIZATION_MANUAL_RESERVE,
+    CONF_OPTIMIZATION_MAX_CHARGE_W,
+    CONF_OPTIMIZATION_MAX_DISCHARGE_W,
+    CONF_OPTIMIZATION_MAX_GRID_EXPORT_W,
+    CONF_POWERWALL_LOCAL_DIN,
+    CONF_POWERWALL_LOCAL_PAIRED,
+    CONF_TESLA_API_PROVIDER,
+    CONF_TESLA_ENERGY_SITE_ID,
+    DEFAULT_OPTIMIZATION_BACKUP_RESERVE,
+    DOMAIN,
+    FLEET_API_TOKEN_URL,
+    SERVICE_SET_GRID_EXPORT,
+    SERVICE_SET_OPERATION_MODE,
+    SERVICE_SYNC_BATTERY_HEALTH,
+    SERVICE_SYNC_NOW,
+    SERVICE_SYNC_TOU,
+    # Tesla integrations for device discovery
+    TESLA_LOCAL_CONTROL_MAX_AGE_SECONDS,
+    TESLA_PROVIDER_FLEET_API,
+    get_tesla_api_base_url,
+)
+from .coordinator import (
+    TeslaEnergyCoordinator,
+)
+from .powerwall_local.dispatch import dispatch_powerwall_write
+from .powerwall_local.services import (
+    register_services as _register_powerwall_local_services,
+)
+from .powerwall_local.views import register_views as _register_powerwall_local_views
+from .sensitive_logging import obfuscate_log_arg, obfuscate_vin_tokens
 from .settings_metadata import optimizer_settings_groups
 from .tesla_calibration import (
     CALIBRATION_SOURCE_LOCAL_ALERT as CALIBRATION_SOURCE_LOCAL_ALERT,
-)
-from .tesla_calibration import (
     clear_calibration_sources,
     dispatch_calibration_state,
+)
+from .tesla_grid_control import (
+    tesla_grid_charging_enabled_from_site_info,
+    tesla_site_info_has_structure,
 )
 
 # Module-level state for alert cooldowns (keyed by entry_id)
@@ -131,11 +194,7 @@ async def _restore_disabled_optimizer_reserve_if_stale(
         return False
     if battery_system in {"tesla", "sigenergy", "goodwe", BATTERY_SYSTEM_CUSTOM}:
         return False
-    if (
-        (force_charge_state or {}).get("active")
-        or (force_discharge_state or {}).get("active")
-        or (hold_soc_state or {}).get("active")
-    ):
+    if (force_charge_state or {}).get("active") or (force_discharge_state or {}).get("active") or (hold_soc_state or {}).get("active"):
         return False
 
     target_reserve, target_source = _disabled_optimizer_backup_reserve_target(entry)
@@ -146,20 +205,12 @@ async def _restore_disabled_optimizer_reserve_if_stale(
         return False
 
     data = getattr(battery_coordinator, "data", None) or {}
-    live_reserve = _entry_percent_int(
-        data.get("backup_reserve")
-        if data.get("backup_reserve") is not None
-        else data.get("min_soc")
-    )
+    live_reserve = _entry_percent_int(data.get("backup_reserve") if data.get("backup_reserve") is not None else data.get("min_soc"))
     if live_reserve is None or live_reserve <= target_reserve + 5:
         return False
 
     try:
-        soc = float(
-            data.get("battery_level")
-            if data.get("battery_level") is not None
-            else data.get("battery_soc")
-        )
+        soc = float(data.get("battery_level") if data.get("battery_level") is not None else data.get("battery_soc"))
         battery_kw = abs(float(data.get("battery_power", 0) or 0))
         grid_kw = float(data.get("grid_power", 0) or 0)
     except (TypeError, ValueError):
@@ -183,8 +234,7 @@ async def _restore_disabled_optimizer_reserve_if_stale(
 
     if restore_method is not None and not await restore_method():
         _LOGGER.warning(
-            "Disabled optimizer %s reserve cleanup: mode restore failed; "
-            "leaving reserve at %d%%",
+            "Disabled optimizer %s reserve cleanup: mode restore failed; leaving reserve at %d%%",
             battery_system,
             live_reserve,
         )
@@ -192,8 +242,7 @@ async def _restore_disabled_optimizer_reserve_if_stale(
 
     if not await battery_coordinator.set_backup_reserve(target_reserve):
         _LOGGER.warning(
-            "Disabled optimizer %s reserve cleanup: failed to restore "
-            "reserve from %d%% to %d%%",
+            "Disabled optimizer %s reserve cleanup: failed to restore reserve from %d%% to %d%%",
             battery_system,
             live_reserve,
             target_reserve,
@@ -204,8 +253,7 @@ async def _restore_disabled_optimizer_reserve_if_stale(
     if refresh:
         await refresh()
     _LOGGER.info(
-        "Disabled optimizer %s reserve cleanup: restored stale reserve "
-        "from %d%% to %d%% using %s",
+        "Disabled optimizer %s reserve cleanup: restored stale reserve from %d%% to %d%% using %s",
         battery_system,
         live_reserve,
         target_reserve,
@@ -293,60 +341,6 @@ def _tariff_display_name(tariff: Any) -> str:
     if not isinstance(tariff, dict):
         return "unknown"
     return str(tariff.get("name") or tariff.get("code") or "unknown")
-
-
-import re
-
-import homeassistant.helpers.config_validation as cv
-from aiohttp import web
-from homeassistant.config_entries import ConfigEntry, ConfigEntryState
-from homeassistant.const import CONF_ACCESS_TOKEN, CONF_TOKEN, Platform
-from homeassistant.core import HomeAssistant, ServiceCall, SupportsResponse
-from homeassistant.exceptions import ConfigEntryNotReady, HomeAssistantError
-from homeassistant.helpers import device_registry as dr
-from homeassistant.helpers.aiohttp_client import async_get_clientsession
-from homeassistant.helpers.dispatcher import (
-    async_dispatcher_send,
-)
-from homeassistant.helpers.storage import Store
-
-from .battery_backend.profiles import resolve_connection_profile
-from .const import (
-    BATTERY_SYSTEM_CUSTOM,
-    CONF_BATTERY_CURTAILMENT_ENABLED,
-    # Battery system selection
-    CONF_BATTERY_SYSTEM,
-    CONF_DEMAND_ALLOW_GRID_CHARGING,
-    CONF_FLEET_API_BASE_URL,
-    CONF_HARDWARE_BACKUP_RESERVE,
-    CONF_OPTIMIZATION_BACKUP_RESERVE,
-    CONF_OPTIMIZATION_MANUAL_RESERVE,
-    CONF_OPTIMIZATION_MAX_CHARGE_W,
-    CONF_OPTIMIZATION_MAX_DISCHARGE_W,
-    CONF_OPTIMIZATION_MAX_GRID_EXPORT_W,
-    CONF_POWERWALL_LOCAL_PAIRED,
-    CONF_TESLA_API_PROVIDER,
-    CONF_TESLA_ENERGY_SITE_ID,
-    DEFAULT_OPTIMIZATION_BACKUP_RESERVE,
-    DOMAIN,
-    SERVICE_SET_GRID_EXPORT,
-    SERVICE_SET_OPERATION_MODE,
-    SERVICE_SYNC_BATTERY_HEALTH,
-    SERVICE_SYNC_NOW,
-    SERVICE_SYNC_TOU,
-    # Tesla integrations for device discovery
-    TESLA_LOCAL_CONTROL_MAX_AGE_SECONDS,
-    TESLA_PROVIDER_FLEET_API,
-    get_tesla_api_base_url,
-)
-from .coordinator import (
-    TeslaEnergyCoordinator,
-)
-from .sensitive_logging import obfuscate_log_arg, obfuscate_vin_tokens
-from .tesla_grid_control import (
-    tesla_grid_charging_enabled_from_site_info,
-    tesla_site_info_has_structure,
-)
 
 
 class SensitiveDataFilter(logging.Filter):
@@ -540,7 +534,7 @@ class SensitiveDataFilter(logging.Filter):
             flags=re.IGNORECASE,
         )
 
-        return text
+        return text  # noqa: RET504
 
     def _obfuscate_arg(self, arg: Any) -> Any:
         """Obfuscate an argument only if it contains sensitive data, preserving type otherwise."""
@@ -557,9 +551,7 @@ class SensitiveDataFilter(logging.Filter):
         # This preserves numeric types for format specifiers like %d and %.3f
         if record.args:
             if isinstance(record.args, dict):
-                record.args = {
-                    k: self._obfuscate_arg(v) for k, v in record.args.items()
-                }
+                record.args = {k: self._obfuscate_arg(v) for k, v in record.args.items()}
             elif isinstance(record.args, tuple):
                 record.args = tuple(self._obfuscate_arg(a) for a in record.args)
 
@@ -593,12 +585,12 @@ def _active_battery_system(
 
 
 PLATFORMS: list[Platform] = [
-    Platform.SENSOR,
-    Platform.SWITCH,
-    Platform.SELECT,
-    Platform.NUMBER,
     Platform.BINARY_SENSOR,
     Platform.BUTTON,
+    Platform.NUMBER,
+    Platform.SELECT,
+    Platform.SENSOR,
+    Platform.SWITCH,
 ]
 
 CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
@@ -608,11 +600,8 @@ STORAGE_VERSION = 1
 STORAGE_KEY = f"{DOMAIN}.storage"
 
 
-def get_tesla_api_token(
-    hass: HomeAssistant, entry: ConfigEntry
-) -> tuple[str | None, str]:
-    """
-    Get the current Tesla API token and provider for this entry.
+def get_tesla_api_token(hass: HomeAssistant, entry: ConfigEntry) -> tuple[str | None, str]:
+    """Get the current Tesla API token and provider for this entry.
 
     Honors the user's configured CONF_TESLA_API_PROVIDER:
     - fleet_api: returns a fresh access token from the tesla_fleet HA integration
@@ -623,9 +612,7 @@ def get_tesla_api_token(
     Returns:
         tuple: (token, provider) where provider is  'fleet_api'
     """
-    configured_provider = entry.data.get(
-        CONF_TESLA_API_PROVIDER, TESLA_PROVIDER_FLEET_API
-    )
+    configured_provider = entry.data.get(CONF_TESLA_API_PROVIDER, TESLA_PROVIDER_FLEET_API)
 
     # Tesla Fleet API: pull a live token from the tesla_fleet integration
     if configured_provider == TESLA_PROVIDER_FLEET_API:
@@ -636,19 +623,125 @@ def get_tesla_api_token(
                     if CONF_TOKEN in tesla_entry.data:
                         token_data = tesla_entry.data[CONF_TOKEN]
                         if CONF_ACCESS_TOKEN in token_data:
-                            return token_data[
-                                CONF_ACCESS_TOKEN
-                            ], TESLA_PROVIDER_FLEET_API
+                            return token_data[CONF_ACCESS_TOKEN], TESLA_PROVIDER_FLEET_API
                 except Exception as e:
-                    _LOGGER.warning(
-                        f"Failed to extract token from Tesla Fleet integration: {e}"
-                    )
+                    _LOGGER.warning(f"Failed to extract token from Tesla Fleet integration: {e}")
+
+        # Fallback: use teslav1r-owned OAuth credentials when tesla_fleet is
+        # missing, unloaded, or temporarily without a token.
+        local_access_token = entry.data.get(CONF_FLEET_API_ACCESS_TOKEN)
+        expires_at = _coerce_unix_ts(entry.data.get(CONF_FLEET_API_TOKEN_EXPIRES_AT))
+        now = time.time()
+
+        if local_access_token and (expires_at is None or expires_at > now + 60):
+            return str(local_access_token), TESLA_PROVIDER_FLEET_API
+
+        if _has_local_fleet_oauth_credentials(entry):
+            _schedule_local_fleet_token_refresh(hass, entry)
+            # If token is still technically valid but within refresh window,
+            # keep using it while refresh runs in background.
+            if local_access_token and (expires_at is None or expires_at > now):
+                return str(local_access_token), TESLA_PROVIDER_FLEET_API
+
         return None, TESLA_PROVIDER_FLEET_API
 
 
-def _get_tesla_site_configs(
-    hass: HomeAssistant, entry: ConfigEntry
-) -> list[tuple[str, str, str]]:
+def _coerce_unix_ts(value: Any) -> float | None:
+    """Parse an arbitrary timestamp field into a unix timestamp."""
+    if value in (None, ""):
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _has_local_fleet_oauth_credentials(entry: ConfigEntry) -> bool:
+    """Return whether entry has teslav1r-owned Fleet OAuth refresh credentials."""
+    return bool(
+        entry.data.get(CONF_FLEET_API_CLIENT_ID)
+        and entry.data.get(CONF_FLEET_API_CLIENT_SECRET)
+        and entry.data.get(CONF_FLEET_API_REFRESH_TOKEN)
+    )
+
+
+def _schedule_local_fleet_token_refresh(hass: HomeAssistant, entry: ConfigEntry) -> None:
+    """Refresh teslav1r-owned Fleet access token once in the background."""
+    domain_bucket = hass.data.setdefault(DOMAIN, {})
+    entry_bucket = domain_bucket.setdefault(entry.entry_id, {})
+    running_task = entry_bucket.get("_local_fleet_token_refresh_task")
+    if isinstance(running_task, asyncio.Task) and not running_task.done():
+        return
+
+    async def _refresh_runner() -> None:
+        try:
+            await _async_refresh_local_fleet_token(hass, entry)
+        except Exception as err:
+            _LOGGER.warning("Local Fleet token refresh failed: %s", err)
+
+    task = hass.async_create_task(
+        _refresh_runner(),
+        name=f"{DOMAIN}_fleet_token_refresh_{entry.entry_id}",
+    )
+    entry_bucket["_local_fleet_token_refresh_task"] = task
+
+
+async def _async_refresh_local_fleet_token(
+    hass: HomeAssistant,
+    entry: ConfigEntry,
+) -> str | None:
+    """Refresh teslav1r-owned Fleet OAuth access token and persist it."""
+    client_id = entry.data.get(CONF_FLEET_API_CLIENT_ID)
+    client_secret = entry.data.get(CONF_FLEET_API_CLIENT_SECRET)
+    refresh_token = entry.data.get(CONF_FLEET_API_REFRESH_TOKEN)
+    if not client_id or not client_secret or not refresh_token:
+        return None
+
+    session = async_get_clientsession(hass)
+    payload = {
+        "grant_type": "refresh_token",
+        "client_id": client_id,
+        "client_secret": client_secret,
+        "refresh_token": refresh_token,
+    }
+
+    async with session.post(
+        FLEET_API_TOKEN_URL,
+        data=payload,
+        timeout=aiohttp.ClientTimeout(total=30),
+    ) as response:
+        if response.status != 200:
+            body = await response.text()
+            _LOGGER.warning(
+                "Local Fleet token refresh rejected (%s): %s",
+                response.status,
+                body[:200],
+            )
+            return None
+
+        body = await response.json(content_type=None)
+        access_token = body.get("access_token")
+        if not access_token:
+            _LOGGER.warning("Local Fleet token refresh succeeded without access_token")
+            return None
+
+        next_refresh_token = body.get("refresh_token") or refresh_token
+        expires_in = body.get("expires_in")
+        try:
+            expires_in_seconds = max(60, int(float(expires_in or 0)))
+        except (TypeError, ValueError):
+            expires_in_seconds = 3600
+
+        new_data = dict(entry.data)
+        new_data[CONF_FLEET_API_ACCESS_TOKEN] = access_token
+        new_data[CONF_FLEET_API_REFRESH_TOKEN] = next_refresh_token
+        new_data[CONF_FLEET_API_TOKEN_EXPIRES_AT] = time.time() + expires_in_seconds
+        hass.config_entries.async_update_entry(entry, data=new_data)
+        _LOGGER.info("Updated teslav1r-managed Fleet API access token")
+        return str(access_token)
+
+
+def _get_tesla_site_configs(hass: HomeAssistant, entry: ConfigEntry) -> list[tuple[str, str, str]]:
     """Return list of (site_id, token, provider) for the Tesla gateway."""
     configs = []
     primary_id = entry.data.get(CONF_TESLA_ENERGY_SITE_ID)
@@ -677,23 +770,15 @@ def _get_tesla_coord_for_view(hass: HomeAssistant):
 MAX_REQUEST_BODY_BYTES = 64 * 1024  # 64 KB limit for API request bodies
 
 
-async def _parse_json_request(
-    request: web.Request, max_bytes: int = MAX_REQUEST_BODY_BYTES
-) -> dict:
+async def _parse_json_request(request: web.Request, max_bytes: int = MAX_REQUEST_BODY_BYTES) -> dict:
     """Parse JSON request body with size limit. Raises ValueError if too large or invalid."""
     content_length = request.content_length
     if content_length is not None and content_length > max_bytes:
-        raise ValueError(
-            f"Request body too large ({content_length} bytes, max {max_bytes})"
-        )
+        raise ValueError(f"Request body too large ({content_length} bytes, max {max_bytes})")
     body_bytes = await request.read()
     if len(body_bytes) > max_bytes:
-        raise ValueError(
-            f"Request body too large ({len(body_bytes)} bytes, max {max_bytes})"
-        )
-    import json as _json
-
-    return _json.loads(body_bytes)
+        raise ValueError(f"Request body too large ({len(body_bytes)} bytes, max {max_bytes})")
+    return json.loads(body_bytes)
 
 
 _API_ERROR_COOLDOWN_SECONDS = 5 * 60  # 5 minutes
@@ -710,8 +795,6 @@ async def _notify_api_error(hass, title: str, message: str) -> None:
 
     TODO: Replace with Home Assistant's built-in notification service.
     """
-    import time
-
     now = time.time()
     last_sent = _last_api_error_notification.get(title, 0)
     if now - last_sent < _API_ERROR_COOLDOWN_SECONDS:
@@ -758,7 +841,7 @@ async def async_remove_config_entry_device(
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up Tesla v1r from a config entry."""
     _LOGGER.info("=" * 60)
-    _LOGGER.info("Tesla v1r integration loading...")
+    _LOGGER.info("Tesla v1r integration loading")
     _LOGGER.info("Domain: %s", DOMAIN)
     _LOGGER.info("Entry ID: %s", entry.entry_id)
     _LOGGER.info("Entry state: %s", entry.state)
@@ -788,9 +871,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         model="Hub",
     )
 
-    # Get initial Tesla API token and provider
-    # Use get_tesla_api_token() which fetches fresh from tesla_fleet if available
+    # Get initial Tesla API token and provider.
+    # Prefer a live token from tesla_fleet; otherwise use teslav1r-managed
+    # OAuth refresh credentials when configured.
     tesla_api_token, tesla_api_provider = get_tesla_api_token(hass, entry)
+
+    if not tesla_api_token and tesla_api_provider == TESLA_PROVIDER_FLEET_API and _has_local_fleet_oauth_credentials(entry):
+        tesla_api_token = await _async_refresh_local_fleet_token(hass, entry)
 
     if not tesla_api_token:
         _LOGGER.error("No Tesla API credentials available")
@@ -846,8 +933,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 await tesla_coordinator.async_config_entry_first_refresh()
             except Exception as err:
                 _LOGGER.warning(
-                    "Tesla Powerwall integration entities are not ready yet; "
-                    "keeping monitoring coordinator active so it can retry: %s",
+                    "Tesla Powerwall integration entities are not ready yet; keeping monitoring coordinator active so it can retry: %s",
                     err,
                 )
         else:
@@ -862,18 +948,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     )
     tesla_grid_charging_preferences = {
         str(site_id): value
-        for site_id, value in (
-            stored_grid_charging_preferences.items()
-            if isinstance(stored_grid_charging_preferences, dict)
-            else ()
-        )
+        for site_id, value in (stored_grid_charging_preferences.items() if isinstance(stored_grid_charging_preferences, dict) else ())
         if isinstance(value, bool)
     }
     cached_export_rule = stored_data.get("cached_export_rule")
     if cached_export_rule:
-        _LOGGER.info(
-            f"Restored cached_export_rule='{cached_export_rule}' from persistent storage"
-        )
+        _LOGGER.info(f"Restored cached_export_rule='{cached_export_rule}' from persistent storage")
 
     # Restore manual export override
     stored_manual_export_override = stored_data.get("manual_export_override", False)
@@ -887,9 +967,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # Restore battery health data from storage
     battery_health = stored_data.get("battery_health")
     if battery_health:
-        _LOGGER.info(
-            f"Restored battery health from storage: {battery_health.get('degradation_percent')}% degradation"
-        )
+        _LOGGER.info(f"Restored battery health from storage: {battery_health.get('degradation_percent')}% degradation")
 
     # Restore force charge/discharge state from storage (survives HA restarts)
     force_mode_state = stored_data.get("force_mode_state")
@@ -910,9 +988,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     startup_tariff_schedule = existing_entry_data.get("tariff_schedule")
     tesla_capabilities = existing_entry_data.get("tesla_capabilities")
     if tesla_capabilities is None and tesla_coordinator:
-        tesla_capabilities = dict(
-            getattr(tesla_coordinator, "tesla_capabilities", {}) or {}
-        )
+        tesla_capabilities = dict(getattr(tesla_coordinator, "tesla_capabilities", {}) or {})
     tesla_site_country = existing_entry_data.get("tesla_site_country")
     if tesla_site_country is None and tesla_coordinator:
         tesla_site_country = getattr(tesla_coordinator, "_site_country", None)
@@ -922,8 +998,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         "tesla_site_country": tesla_site_country,
         "tesla_grid_charging_preferences": tesla_grid_charging_preferences,
         "battery_connection_profile": battery_connection_profile,
-        "powerwall_local": powerwall_local_runtime
-        or {"client": None, "coordinator": None, "pairing_manager": None},
+        "powerwall_local": powerwall_local_runtime or {"client": None, "coordinator": None, "pairing_manager": None},
         "entry": entry,
         "tariff_schedule": startup_tariff_schedule,
         "demand_allow_grid_charging": entry.options.get(
@@ -952,9 +1027,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         """Return the configured static site cap for envelope normalization."""
         entry_data = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
         optimization = entry_data.get("optimization_coordinator")
-        configured = getattr(
-            getattr(optimization, "_config", None), "max_grid_export_w", None
-        )
+        configured = getattr(getattr(optimization, "_config", None), "max_grid_export_w", None)
         if configured is None:
             configured = entry.options.get(
                 CONF_OPTIMIZATION_MAX_GRID_EXPORT_W,
@@ -969,10 +1042,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # Build the local Powerwall coordinator before entities are created. Tesla
     # energy sensors attach a second listener to this coordinator so paired
     # installs update from LAN telemetry instead of waiting for cloud samples.
-    if (
-        entry.data.get(CONF_POWERWALL_LOCAL_PAIRED)
-        and battery_connection_profile.profile_id != "tesla_powerwall_monitoring"
-    ):
+    if entry.data.get(CONF_POWERWALL_LOCAL_PAIRED) and battery_connection_profile.profile_id != "tesla_powerwall_monitoring":
         try:
             await hass.async_add_executor_job(_preload_powerwall_local_modules)
             from .powerwall_local.views import (
@@ -980,7 +1050,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             )
 
             await _ensure_pwlocal_coordinator(hass, entry)
-        except Exception as _err:
+        except Exception as _err:  # noqa: BLE001
             _LOGGER.debug(
                 "Powerwall local coordinator early warmup skipped: %s",
                 _err,
@@ -1008,10 +1078,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 try:
                     from .automations.actions import _send_expo_push
 
-                    await _send_expo_push(
-                        hass, "Powerwall Update", f"Firmware updated: {current_fw}"
-                    )
-                except Exception:
+                    await _send_expo_push(hass, "Powerwall Update", f"Firmware updated: {current_fw}")
+                except Exception:  # noqa: BLE001
                     pass
             if current_fw != last_known_firmware:
                 last_known_firmware = current_fw
@@ -1037,9 +1105,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             await store.async_save(stored_data)
             _LOGGER.debug(f"Persisted cached_export_rule='{new_rule}' to storage")
         except Exception as err:
-            _LOGGER.warning(
-                f"Could not persist cached_export_rule='{new_rule}' to storage: {err}"
-            )
+            _LOGGER.warning("Could not persist cached_export_rule='%s' to storage: %s", new_rule, err)
         # Signal sensor to update
         async_dispatcher_send(hass, f"tesla_v1r_curtailment_updated_{entry.entry_id}")
 
@@ -1051,7 +1117,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             refresh = getattr(local_coord, "async_request_refresh", None)
             if refresh:
                 await refresh()
-        except Exception as err:
+        except Exception as err:  # noqa: BLE001
             _LOGGER.debug(
                 "Powerwall local readback refresh after %s failed: %s",
                 label,
@@ -1062,8 +1128,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         """Get live status from the active site coordinator when available."""
 
         try:
-            from .automations.live_status import coordinator_data_to_live_status
-
             entry_data = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
             for coord_key in ("tesla_coordinator",):
                 coordinator = entry_data.get(coord_key)
@@ -1078,7 +1142,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     live_status["is_curtailed"] = False
                 _LOGGER.debug("Live status from %s", coord_key)
                 return live_status
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001
             _LOGGER.debug("Error getting cached coordinator live status: %s", e)
 
         return None
@@ -1106,9 +1170,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 return None
 
             session = async_get_clientsession(hass)
-            api_base_url = get_tesla_api_base_url(
-                current_provider, entry.data.get(CONF_FLEET_API_BASE_URL)
-            )
+            api_base_url = get_tesla_api_base_url(current_provider, entry.data.get(CONF_FLEET_API_BASE_URL))
             headers = {
                 "Authorization": f"Bearer {current_token}",
                 "Content-Type": "application/json",
@@ -1124,13 +1186,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     site_status = data.get("response", {})
                     result = {
                         "battery_soc": site_status.get("percentage_charged"),
-                        "grid_power": site_status.get(
-                            "grid_power"
-                        ),  # Negative = exporting
+                        "grid_power": site_status.get("grid_power"),  # Negative = exporting
                         "solar_power": site_status.get("solar_power"),
-                        "battery_power": site_status.get(
-                            "battery_power"
-                        ),  # Negative = charging
+                        "battery_power": site_status.get("battery_power"),  # Negative = charging
                         "load_power": site_status.get("load_power"),
                     }
                     _LOGGER.debug(
@@ -1140,8 +1198,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 else:
                     _LOGGER.debug(f"Failed to get live_status: {response.status}")
 
-        except Exception as e:
-            _LOGGER.debug(f"Error getting live status: {e}")
+        except Exception as e:  # noqa: BLE001
+            _LOGGER.debug("Error getting live status: %s", e)
 
         return None
 
@@ -1162,13 +1220,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # ======================================================================
 
     # Get persisted force mode state (survives HA restarts)
-    persisted_force_state = (
-        hass.data[DOMAIN][entry.entry_id].get("force_mode_state") or {}
-    )
+    persisted_force_state = hass.data[DOMAIN][entry.entry_id].get("force_mode_state") or {}
     if persisted_force_state.get("source") == "optimizer":
-        hass.data[DOMAIN][entry.entry_id]["optimizer_force_restart_restore_pending"] = (
-            True
-        )
+        hass.data[DOMAIN][entry.entry_id]["optimizer_force_restart_restore_pending"] = True
 
     # Storage for saved tariff and operation mode during force discharge
     force_discharge_state = {
@@ -1203,13 +1257,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         "_skip_backup_reserve_restore": False,
     }
     if persisted_force_state.get("mode") == "charge":
-        force_charge_state["_skip_backup_reserve_restore"] = bool(
-            persisted_force_state.get("_skip_backup_reserve_restore")
-        )
+        force_charge_state["_skip_backup_reserve_restore"] = bool(persisted_force_state.get("_skip_backup_reserve_restore"))
     elif persisted_force_state.get("mode") == "discharge":
-        force_discharge_state["_skip_backup_reserve_restore"] = bool(
-            persisted_force_state.get("_skip_backup_reserve_restore")
-        )
+        force_discharge_state["_skip_backup_reserve_restore"] = bool(persisted_force_state.get("_skip_backup_reserve_restore"))
 
     # Hold-SoC mode: brand-specific battery movement suppression. Some brands
     # can block both directions; others only block discharge while still
@@ -1257,9 +1307,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     _tesla_reserve_write_lock = asyncio.Lock()
     _tesla_reserve_write_tasks: set[asyncio.Task] = set()
     _tesla_reserve_pulse_runtime = hass.data[DOMAIN][entry.entry_id]
-    _tesla_reserve_pulse_runtime["tesla_reserve_write_tasks"] = (
-        _tesla_reserve_write_tasks
-    )
+    _tesla_reserve_pulse_runtime["tesla_reserve_write_tasks"] = _tesla_reserve_write_tasks
     _tesla_reserve_pulse_runtime["tesla_reserve_pulse_stopping"] = False
 
     def _cancel_all_force_timers(reason: str = "") -> None:
@@ -1382,9 +1430,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             _remember_tesla_grid_charging_preference(site_id, enabled)
         try:
             data = await store.async_load() or {}
-            data["tesla_grid_charging_preferences"] = dict(
-                tesla_grid_charging_preferences
-            )
+            data["tesla_grid_charging_preferences"] = dict(tesla_grid_charging_preferences)
             await store.async_save(data)
         except Exception as store_err:
             _LOGGER.warning(
@@ -1399,9 +1445,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         """Return Tesla sites whose pre-force grid setting is not observable."""
         entry_data = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
         local_coordinator = (
-            entry_data.get("powerwall_local", {}).get("coordinator")
-            if entry.data.get(CONF_POWERWALL_LOCAL_PAIRED)
-            else None
+            entry_data.get("powerwall_local", {}).get("coordinator") if entry.data.get(CONF_POWERWALL_LOCAL_PAIRED) else None
         )
         local_snapshot = getattr(local_coordinator, "data", None)
         local_last_success = getattr(
@@ -1412,8 +1456,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         local_snapshot_fresh = (
             local_snapshot is not None
             and local_last_success is not None
-            and time.monotonic() - local_last_success
-            <= TESLA_LOCAL_CONTROL_MAX_AGE_SECONDS
+            and time.monotonic() - local_last_success <= TESLA_LOCAL_CONTROL_MAX_AGE_SECONDS
         )
         session = async_get_clientsession(hass)
         unknown_sites: list[str] = []
@@ -1447,10 +1490,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                         if response.status == 200:
                             data = await response.json()
                             site_info = data.get("response", {})
-                            observed_grid_charging = (
-                                _tesla_grid_charging_enabled_from_site_info(site_info)
-                            )
-                except Exception as baseline_err:
+                            observed_grid_charging = _tesla_grid_charging_enabled_from_site_info(site_info)
+                except Exception as baseline_err:  # noqa: BLE001
                     _LOGGER.warning(
                         "Could not read Tesla grid charging baseline for site %s: %s",
                         site_id,
@@ -1499,11 +1540,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     def _configured_force_power_w(direction: str) -> int:
         """Return the optimizer max power setting for manual force commands."""
-        key = (
-            CONF_OPTIMIZATION_MAX_CHARGE_W
-            if direction == "charge"
-            else CONF_OPTIMIZATION_MAX_DISCHARGE_W
-        )
+        key = CONF_OPTIMIZATION_MAX_CHARGE_W if direction == "charge" else CONF_OPTIMIZATION_MAX_DISCHARGE_W
         value = entry.options.get(key, entry.data.get(key))
         try:
             parsed = float(value)
@@ -1549,13 +1586,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         """
         mode = call.data.get("mode")
         if mode not in ("autonomous", "self_consumption", "backup"):
-            _LOGGER.error(
-                f"Invalid operation mode: {mode}. Must be 'autonomous', 'self_consumption', or 'backup'."
-            )
+            _LOGGER.error("Invalid operation mode: %s. Must be 'autonomous', 'self_consumption', or 'backup'.", mode)
             return
-
-        from .const import CONF_POWERWALL_LOCAL_DIN
-        from .powerwall_local.dispatch import dispatch_powerwall_write
 
         async def _local(transport) -> bool:
             din = entry.data.get(CONF_POWERWALL_LOCAL_DIN)
@@ -1568,11 +1600,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 if attempt > 1:
                     await asyncio.sleep(2)
                 config = await transport.read_config(din)
-                observed_mode = (
-                    config.get("default_real_mode")
-                    if isinstance(config, dict)
-                    else None
-                )
+                observed_mode = config.get("default_real_mode") if isinstance(config, dict) else None
                 if observed_mode == mode:
                     _LOGGER.info(
                         "Confirmed local Tesla operation mode %s for DIN %s (attempt %d/3)",
@@ -1638,21 +1666,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                             )
                             return None, False, False
                         data = await response.json()
-                        site_info = (
-                            data.get("response", data)
-                            if isinstance(data, dict)
-                            else None
-                        )
-                        if not isinstance(
-                            site_info, dict
-                        ) or not tesla_site_info_has_structure(site_info):
+                        site_info = data.get("response", data) if isinstance(data, dict) else None
+                        if not isinstance(site_info, dict) or not tesla_site_info_has_structure(site_info):
                             return None, False, False
                         return (
                             site_info.get("default_real_mode"),
                             "default_real_mode" in site_info,
                             True,
                         )
-                except Exception as err:
+                except Exception as err:  # noqa: BLE001
                     _LOGGER.warning(
                         "Tesla operation mode readback error for site %s: %s",
                         site_id,
@@ -1767,13 +1789,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
                 # Retry up to 3 times for operation mode
                 for attempt in range(1, 4):
-                    ok, status, text = await _post_mode(
-                        api_base, site_id, headers, mode
-                    )
+                    ok, status, text = await _post_mode(api_base, site_id, headers, mode)
                     if ok:
-                        _LOGGER.info(
-                            "Operation mode set to %s for site %s", mode, site_id
-                        )
+                        _LOGGER.info("Operation mode set to %s for site %s", mode, site_id)
                         confirmation = await _confirm_mode(
                             api_base,
                             site_id,
@@ -1782,9 +1800,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                         )
                         if confirmation == "accepted_field_absent":
                             _LOGGER.warning(
-                                "Tesla accepted self_consumption for site %s "
-                                "and every valid site_info readback omitted "
-                                "default_real_mode",
+                                "Tesla accepted self_consumption for site %s and every valid site_info readback omitted default_real_mode",
                                 site_id,
                             )
                         if confirmation in (
@@ -1863,38 +1879,24 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 label="set_operation_mode",
             )
             if success:
-                _tesla_coord_for_cache = (
-                    hass.data.get(DOMAIN, {})
-                    .get(entry.entry_id, {})
-                    .get("tesla_coordinator")
-                )
+                _tesla_coord_for_cache = hass.data.get(DOMAIN, {}).get(entry.entry_id, {}).get("tesla_coordinator")
                 if _tesla_coord_for_cache is not None:
                     _tesla_coord_for_cache.invalidate_site_info_cache()
                 if mode == "self_consumption" and entry.entry_id in hass.data[DOMAIN]:
-                    hass.data[DOMAIN][entry.entry_id].pop(
-                        "last_force_toggle_time", None
-                    )
-                    _LOGGER.debug(
-                        "Cleared last_force_toggle_time (user set self_consumption)"
-                    )
-                hass.async_create_task(
-                    refresh_powerwall_local_after_settings_write("set_operation_mode")
-                )
+                    hass.data[DOMAIN][entry.entry_id].pop("last_force_toggle_time", None)
+                    _LOGGER.debug("Cleared last_force_toggle_time (user set self_consumption)")
+                hass.async_create_task(refresh_powerwall_local_after_settings_write("set_operation_mode"))
             else:
-                raise HomeAssistantError(
-                    f"Could not verify Tesla operation mode changed to {mode}"
-                )
-        except Exception as e:
-            _LOGGER.error(f"Error setting operation mode: {e}", exc_info=True)
+                raise HomeAssistantError(f"Could not verify Tesla operation mode changed to {mode}")
+        except:
+            _LOGGER.exception("Error setting operation mode")
             raise
 
     async def handle_set_grid_export(call: ServiceCall) -> None:
         """Set the grid export rule."""
         rule = call.data.get("rule")
         if rule not in ("never", "pv_only", "battery_ok"):
-            _LOGGER.error(
-                f"Invalid grid export rule: {rule}. Must be 'never', 'pv_only', or 'battery_ok'."
-            )
+            _LOGGER.error("Invalid grid export rule: %s. Must be 'never', 'pv_only', or 'battery_ok'.", rule)
             return
 
         # A permissive export-rule write can remove an inverter-side cap and
@@ -1904,11 +1906,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         # raising a connection limit.
         _grid_export_entry_data = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
         _grid_export_manager = _grid_export_entry_data.get("network_envelope_manager")
-        if (
-            rule != "never"
-            and _grid_export_manager is not None
-            and _grid_export_manager.snapshot.mode != "off"
-        ):
+        if rule != "never" and _grid_export_manager is not None and _grid_export_manager.snapshot.mode != "off":
             _LOGGER.warning(
                 "Grid export rule %s blocked while the network envelope is %s",
                 rule,
@@ -1916,28 +1914,21 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             )
             return
 
-        _LOGGER.info(f"📤 Setting grid export rule to {rule}")
+        _LOGGER.info("📤 Setting grid export rule to %s", rule)
 
         try:
             entry_data = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
-
-            from .const import CONF_POWERWALL_LOCAL_DIN
-            from .powerwall_local.dispatch import dispatch_powerwall_write
 
             async def _local(transport) -> bool:
                 din = entry.data.get(CONF_POWERWALL_LOCAL_DIN)
                 if not din:
                     return False
-                return await transport.write_config(
-                    din, {"site_info.customer_preferred_export_rule": rule}
-                )
+                return await transport.write_config(din, {"site_info.customer_preferred_export_rule": rule})
 
             async def _cloud() -> bool:
                 site_configs = _get_tesla_site_configs(hass, entry)
                 if not site_configs:
-                    _LOGGER.debug(
-                        "set_grid_export: no Tesla site config (non-Tesla system)"
-                    )
+                    _LOGGER.debug("set_grid_export: no Tesla site config (non-Tesla system)")
                     return False
 
                 any_ok = False
@@ -1947,9 +1938,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                         "Authorization": f"Bearer {current_token}",
                         "Content-Type": "application/json",
                     }
-                    api_base = get_tesla_api_base_url(
-                        provider, entry.data.get(CONF_FLEET_API_BASE_URL)
-                    )
+                    api_base = get_tesla_api_base_url(provider, entry.data.get(CONF_FLEET_API_BASE_URL))
 
                     async with session.post(
                         f"{api_base}/api/1/energy_sites/{site_id}/grid_import_export",
@@ -1958,9 +1947,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                         timeout=aiohttp.ClientTimeout(total=30),
                     ) as response:
                         if response.status == 200:
-                            _LOGGER.info(
-                                "Grid export rule set to %s for site %s", rule, site_id
-                            )
+                            _LOGGER.info("Grid export rule set to %s for site %s", rule, site_id)
                             any_ok = True
                         else:
                             text = await response.text()
@@ -1980,20 +1967,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 label="set_grid_export",
             )
             if success:
-                entry_data = hass.data.setdefault(DOMAIN, {}).setdefault(
-                    entry.entry_id, {}
-                )
-                local_coord = (entry_data.get("powerwall_local") or {}).get(
-                    "coordinator"
-                )
+                entry_data = hass.data.setdefault(DOMAIN, {}).setdefault(entry.entry_id, {})
+                local_coord = (entry_data.get("powerwall_local") or {}).get("coordinator")
                 local_snapshot = getattr(local_coord, "data", None)
                 if local_snapshot is not None:
                     local_snapshot.grid_export_rule = rule
-                _tesla_coord_for_cache = (
-                    hass.data.get(DOMAIN, {})
-                    .get(entry.entry_id, {})
-                    .get("tesla_coordinator")
-                )
+                _tesla_coord_for_cache = hass.data.get(DOMAIN, {}).get(entry.entry_id, {}).get("tesla_coordinator")
                 if _tesla_coord_for_cache is not None:
                     _tesla_coord_for_cache.invalidate_site_info_cache()
                 solar_curtailment_enabled = entry.options.get(
@@ -2005,9 +1984,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     entry_data["manual_export_rule"] = rule
                     _LOGGER.info("Manual export override enabled: %s", rule)
                 await update_cached_export_rule(rule)
-                hass.async_create_task(
-                    refresh_powerwall_local_after_settings_write("set_grid_export")
-                )
+                hass.async_create_task(refresh_powerwall_local_after_settings_write("set_grid_export"))
                 if solar_curtailment_enabled:
                     # Persist so the override survives HA restarts / config reloads
                     try:
@@ -2018,12 +1995,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                             _sd["manual_export_rule"] = rule
                             await _store.async_save(_sd)
                     except Exception as _persist_err:
-                        _LOGGER.debug(
-                            "Could not persist manual_export_override: %s", _persist_err
-                        )
+                        _LOGGER.debug("Could not persist manual_export_override: %s", _persist_err)
 
         except Exception as e:
-            _LOGGER.error(f"Error setting grid export rule: {e}", exc_info=True)
+            _LOGGER.error("Error setting grid export rule: %s", e)
+            raise
 
     async def handle_set_grid_export_auto(call: ServiceCall) -> None:
         """Clear manual export override and return to automatic control."""
@@ -2040,13 +2016,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     _sd["manual_export_override"] = False
                     _sd["manual_export_rule"] = None
                     await _store.async_save(_sd)
-            except Exception as _persist_err:
-                _LOGGER.debug(
-                    "Could not clear persisted manual_export_override: %s", _persist_err
-                )
+            except Exception as _persist_err:  # noqa: BLE001
+                _LOGGER.debug("Could not clear persisted manual_export_override: %s", _persist_err)
             _LOGGER.info("✅ Manual export override cleared")
-        except Exception as e:
-            _LOGGER.error(f"Error clearing manual export override: {e}", exc_info=True)
+        except:
+            _LOGGER.exception("Error clearing manual export override")
+            raise
 
     def _get_tesla_coordinator_for_service(service_name: str):
         """Return the Tesla energy coordinator for this entry, or None with a log."""
@@ -2073,45 +2048,27 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         )
 
     # Register Powerwall settings services
-    hass.services.async_register(
-        DOMAIN, SERVICE_SET_OPERATION_MODE, handle_set_operation_mode
-    )
-    hass.services.async_register(
-        DOMAIN, SERVICE_SET_GRID_EXPORT, handle_set_grid_export
-    )
-    hass.services.async_register(
-        DOMAIN, "set_grid_export_auto", handle_set_grid_export_auto
-    )
-    hass.services.async_register(
-        DOMAIN, "refresh_calibration", handle_refresh_calibration
-    )
+    hass.services.async_register(DOMAIN, SERVICE_SET_OPERATION_MODE, handle_set_operation_mode)
+    hass.services.async_register(DOMAIN, SERVICE_SET_GRID_EXPORT, handle_set_grid_export)
+    hass.services.async_register(DOMAIN, "set_grid_export_auto", handle_set_grid_export_auto)
+    hass.services.async_register(DOMAIN, "refresh_calibration", handle_refresh_calibration)
 
-    _LOGGER.info(
-        "🔋 Force charge/discharge, restore, and Powerwall settings services registered"
-    )
+    _LOGGER.info("🔋 Force charge/discharge, restore, and Powerwall settings services registered")
 
     # Preload protobuf C extension off the event loop before the import chain runs.
     await hass.async_add_executor_job(_preload_powerwall_local_modules)
 
     # Register Powerwall local pairing + off-grid HTTP endpoints
-    from .powerwall_local.services import (
-        register_services as _register_powerwall_local_services,
-    )
-    from .powerwall_local.views import register_views as _register_powerwall_local_views
-
     _register_powerwall_local_views(hass)
     _register_powerwall_local_services(hass)
-    _LOGGER.info(
-        "🔌 Powerwall local control endpoints + services registered "
-        "(pair/status/cancel/unpair/off_grid/local_status)"
-    )
+    _LOGGER.info("🔌 Powerwall local control endpoints + services registered (pair/status/cancel/unpair/off_grid/local_status)")
 
     # Warm up the local coordinator if this entry is already paired.
     from .powerwall_local.views import ensure_coordinator as _ensure_pwlocal_coordinator
 
     try:
         await _ensure_pwlocal_coordinator(hass, entry)
-    except Exception as _err:
+    except Exception as _err:  # noqa: BLE001
         _LOGGER.debug("Powerwall local coordinator warmup skipped: %s", _err)
 
     # ======================================================================
@@ -2125,16 +2082,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         degradation_percent = call.data.get("degradation_percent")
         battery_count = call.data.get("battery_count", 1)
         scanned_at = call.data.get("scanned_at", dt_util.now().isoformat())
-        individual_batteries = call.data.get(
-            "individual_batteries"
-        )  # Optional per-battery data
+        individual_batteries = call.data.get("individual_batteries")  # Optional per-battery data
 
         # Validate required fields
-        if (
-            original_capacity_wh is None
-            or current_capacity_wh is None
-            or degradation_percent is None
-        ):
+        if original_capacity_wh is None or current_capacity_wh is None or degradation_percent is None:
             _LOGGER.error("Missing required battery health fields")
             return {
                 "success": False,
@@ -2142,14 +2093,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             }
 
         # Calculate health percentage (can be > 100% if batteries have more capacity than spec)
-        health_percent = (
-            round((current_capacity_wh / original_capacity_wh) * 100, 1)
-            if original_capacity_wh > 0
-            else 0
-        )
+        health_percent = round((current_capacity_wh / original_capacity_wh) * 100, 1) if original_capacity_wh > 0 else 0
 
         _LOGGER.info(
-            f"🔋 Battery health received: {health_percent}% health ({current_capacity_wh}Wh / {original_capacity_wh}Wh, {battery_count} units)"
+            "🔋 Battery health received: %s%% health (%sWh / %sWh, %s units)",
+            health_percent,
+            current_capacity_wh,
+            original_capacity_wh,
+            battery_count,
         )
 
         # Build battery health data
@@ -2164,7 +2115,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         # Include individual battery data if provided
         if individual_batteries:
             battery_health_data["individual_batteries"] = individual_batteries
-            _LOGGER.info(f"  → Individual batteries: {len(individual_batteries)} units")
+            _LOGGER.info("  → Individual batteries: %s units", len(individual_batteries))
 
         # Store in hass.data for sensor to read on startup
         hass.data[DOMAIN][entry.entry_id]["battery_health"] = battery_health_data
@@ -2214,9 +2165,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     return True
 
 
-async def _async_options_update_listener(
-    hass: HomeAssistant, entry: ConfigEntry
-) -> None:
+async def _async_options_update_listener(hass: HomeAssistant, entry: ConfigEntry) -> None:
     """Reload integration when options change (unless API-driven)."""
     domain_data = hass.data.get(DOMAIN, {})
     entry_data = domain_data.get(entry.entry_id, {})
@@ -2242,8 +2191,8 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         try:
             await signaling.stop()
             _LOGGER.info("Tesla signaling WebSocket stopped")
-        except Exception as e:
-            _LOGGER.error(f"Error stopping Tesla signaling WebSocket: {e}")
+        except Exception as e:  # noqa: BLE001
+            _LOGGER.error("Error stopping Tesla signaling WebSocket: %s", e)
 
     # Stop the local Powerwall (TEDAPI) poller if it exists. A keep-alive
     # no-op listener is anchored at construction time (see
@@ -2255,20 +2204,18 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     if pw_local_coordinator := pw_local.get("coordinator"):
         try:
             pw_local_coordinator.update_interval = None
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001
             _LOGGER.debug("Error clearing powerwall_local update_interval: %s", e)
         keepalive_unsub = getattr(pw_local_coordinator, "_keepalive_unsub", None)
         if callable(keepalive_unsub):
             try:
                 keepalive_unsub()
-            except Exception as e:
-                _LOGGER.debug(
-                    "Error unsubscribing powerwall_local keepalive listener: %s", e
-                )
+            except Exception as e:  # noqa: BLE001
+                _LOGGER.debug("Error unsubscribing powerwall_local keepalive listener: %s", e)
         if hasattr(pw_local_coordinator, "async_shutdown"):
             try:
                 await pw_local_coordinator.async_shutdown()
-            except Exception as e:
+            except Exception as e:  # noqa: BLE001
                 _LOGGER.debug("Error shutting down powerwall_local coordinator: %s", e)
         pw_local["coordinator"] = None
         _LOGGER.debug("Stopped Powerwall local (TEDAPI) coordinator")
@@ -2282,18 +2229,14 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         coord = entry_data.get(coord_key)
         if coord and hasattr(coord, "_energy_acc"):
             try:
-                await coord._energy_acc.async_flush()
-            except Exception as e:
-                _LOGGER.debug(
-                    "Failed to flush energy accumulator for %s: %s", coord_key, e
-                )
+                await coord._energy_acc.async_flush()  # TODO
+            except Exception as e:  # noqa: BLE001
+                _LOGGER.debug("Failed to flush energy accumulator for %s: %s", coord_key, e)
         if coord and hasattr(coord, "async_flush_lifetime_totals"):
             try:
                 await coord.async_flush_lifetime_totals()
-            except Exception as e:
-                _LOGGER.debug(
-                    "Failed to flush lifetime totals for %s: %s", coord_key, e
-                )
+            except Exception as e:  # noqa: BLE001
+                _LOGGER.debug("Failed to flush lifetime totals for %s: %s", coord_key, e)
 
     # Unload platforms
     unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
