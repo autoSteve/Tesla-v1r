@@ -1,7 +1,5 @@
 """Sensor platform for Teslav1r integration."""
 
-from __future__ import annotations
-
 import logging
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -830,103 +828,6 @@ def _format_optimizer_window(start: datetime | None, end: datetime | None) -> st
     end_local = dt_util.as_local(end)
     prefix = "" if start_local.date() == dt_util.now().date() else f"{start_local:%a} "
     return f"{prefix}{start_local:%H:%M}-{end_local:%H:%M}"
-
-
-def _optimizer_action_names(action: str | tuple[str, ...]) -> tuple[str, ...]:
-    """Normalize one or more optimizer action names."""
-    return (action,) if isinstance(action, str) else action
-
-
-def _future_optimizer_action_windows(
-    data: dict[str, Any] | None,
-    action: str | tuple[str, ...],
-) -> list[dict[str, Any]]:
-    """Return future consolidated optimizer windows for an action."""
-    if not data:
-        return []
-
-    action_names = _optimizer_action_names(action)
-    windows: list[dict[str, Any]] = []
-    now = dt_util.now()
-    for item in data.get("next_actions") or []:
-        item_action = item.get("action")
-        if item_action not in action_names:
-            continue
-
-        start = _parse_optimizer_time(item.get("timestamp"))
-        end = _parse_optimizer_time(item.get("end_time"))
-        if end and end <= now:
-            continue
-
-        planned_power_w = item.get("power_w")
-        display_power_w = planned_power_w
-        if start and end and start <= now < end:
-            effective_action = data.get("effective_current_action") or data.get(
-                "current_action"
-            )
-            if item_action == effective_action:
-                try:
-                    current_power_w = float(data.get("current_power_w") or 0)
-                except (TypeError, ValueError):
-                    current_power_w = 0
-                if current_power_w > 0:
-                    display_power_w = current_power_w
-
-        window: dict[str, Any] = {
-            "action": item_action,
-            "start_time": item.get("timestamp"),
-            "end_time": item.get("end_time"),
-            "label": _format_optimizer_window(start, end),
-            "power_w": display_power_w,
-            "planned_power_w": planned_power_w,
-            "soc": item.get("soc"),
-        }
-
-        if start and end:
-            window["duration_minutes"] = round((end - start).total_seconds() / 60)
-
-        windows.append(window)
-
-    return windows
-
-
-def _optimizer_window_state(
-    data: dict[str, Any] | None,
-    action: str | tuple[str, ...],
-) -> str:
-    """Return a short sensor state for upcoming optimizer windows."""
-    windows = _future_optimizer_action_windows(data, action)
-    if not windows:
-        return "none"
-
-    labels = [w["label"] for w in windows if w.get("label")]
-    state = ", ".join(labels)
-    if len(state) <= 255:
-        return state
-
-    return f"{labels[0]} (+{len(labels) - 1} more)"
-
-
-def _optimizer_window_attributes(
-    data: dict[str, Any] | None,
-    action: str | tuple[str, ...],
-) -> dict[str, Any]:
-    """Return attributes for upcoming optimizer windows."""
-    action_names = _optimizer_action_names(action)
-    windows = _future_optimizer_action_windows(data, action)
-    total_minutes = sum(w.get("duration_minutes", 0) or 0 for w in windows)
-    attrs: dict[str, Any] = {
-        "actions": list(action_names),
-        "count": len(windows),
-        "total_minutes": total_minutes,
-        "windows": windows,
-    }
-    if windows:
-        attrs["next_start"] = windows[0].get("start_time")
-        attrs["next_end"] = windows[0].get("end_time")
-        attrs["next_label"] = windows[0].get("label")
-        attrs["next_power_w"] = windows[0].get("power_w")
-    return attrs
 
 
 class BatteryIntegrationDetailsSensor(SensorEntity):

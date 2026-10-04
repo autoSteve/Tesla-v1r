@@ -1,42 +1,13 @@
-# Services for PowerSync integration
+# Services for Tesla v1r integration
 sync_tou_schedule:
   name: Sync TOU Schedule
-  description: Manually refresh Time-of-Use tariff prices. Tesla systems upload the schedule; Modbus systems store it for PowerSync display and optimization.
+  description: Manually refresh Time-of-Use tariff prices. Tesla systems upload the schedule; Modbus systems store it for Tesla v1r display and optimization.
   fields: {}
 
 sync_now:
   name: Sync Now
   description: Immediately refresh data from Amber and Tesla
   fields: {}
-
-preview_history_relink:
-  name: Preview History Relink
-  description: Preview Sungrow mkaiser-to-PowerSync entity relinks without changing entities.
-  fields:
-    entry_id:
-      name: Entry ID
-      description: Optional PowerSync config entry ID. Omit to use the Sungrow entry.
-      required: false
-      selector:
-        text:
-
-apply_history_relink:
-  name: Apply History Relink
-  description: Apply ready Sungrow mkaiser-to-PowerSync entity relinks. Does not rewrite recorder statistics.
-  fields:
-    entry_id:
-      name: Entry ID
-      description: Optional PowerSync config entry ID. Omit to use the Sungrow entry.
-      required: false
-      selector:
-        text:
-    confirm:
-      name: Confirm
-      description: Must be true to apply the relinks.
-      required: true
-      default: false
-      selector:
-        boolean:
 
 force_discharge:
   name: Force Discharge
@@ -443,26 +414,8 @@ schedule_max_backup:
 refresh_calibration:
   name: Refresh Calibration
   description: >-
-    Clear PowerSync's calibration_suspected flag. Use after a Powerwall
+    Clear Tesla v1r's calibration_suspected flag. Use after a Powerwall
     calibration cycle completes if the optimiser hasn't auto-cleared the flag,
     or to retry mode toggles immediately. Doesn't touch the Powerwall — purely
     resets the integration's local guard.
   fields: {}
-
-reconcile_solaredge_control:
-  name: Reconcile SolarEdge control
-  description: Read fresh storage settings through SolarEdge Modbus Multi and clear the persistent control block only when a safe baseline is verified. Run under supervision after inspecting the inverter. This service does not write inverter settings.
-  fields:
-    entry_id:
-      name: PowerSync entry
-      description: Config entry ID of the PowerSync SolarEdge battery.
-      required: true
-      selector:
-        text:
-    acknowledge:
-      name: Acknowledge supervised recovery
-      description: Confirm that you have inspected the inverter and are supervising this recovery.
-      required: true
-      default: false
-      selector:
-        boolean:
