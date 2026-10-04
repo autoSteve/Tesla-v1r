@@ -155,6 +155,24 @@ POWERWALL_LOCAL_POLL_INTERVAL = 2  # seconds
 # Pairing window the user has to toggle the Powerwall switch.
 POWERWALL_PAIRING_WINDOW_SECONDS = 120
 
+# Powerwall off-grid as a curtailment fallback — opt-in feature for users
+# with inverters that can't curtail (Enphase AGF profile, no inverter
+# configured, etc). When the normal curtailment path is unavailable AND
+# excess solar would be exported at negative prices, the integration can
+# instead physically open the Powerwall grid contactor so the house runs
+# islanded until the trigger condition clears.
+CONF_POWERWALL_OFFGRID_AS_CURTAILMENT = "powerwall_offgrid_as_curtailment"
+DEFAULT_POWERWALL_OFFGRID_AS_CURTAILMENT = False
+# Higher SOC floor than manual off-grid — the house will be running off
+# battery for potentially hours, so we need more headroom.
+CONF_POWERWALL_OFFGRID_CURTAILMENT_MIN_SOC = "powerwall_offgrid_curtailment_min_soc"
+DEFAULT_POWERWALL_OFFGRID_CURTAILMENT_MIN_SOC = 40
+# Cumulative daily cap on off-grid-as-curtailment duration (seconds).
+# Prevents a runaway loop when the price trigger is sticky or when the
+# battery is being drained faster than solar can refill it.
+CONF_POWERWALL_OFFGRID_CURTAILMENT_MAX_SECONDS = "powerwall_offgrid_curtailment_max_seconds"
+DEFAULT_POWERWALL_OFFGRID_CURTAILMENT_MAX_SECONDS = 6 * 60 * 60  # 6h
+
 # AEMO region options (NEM regions)
 AEMO_REGIONS = {
     "NSW1": "NSW - New South Wales",
