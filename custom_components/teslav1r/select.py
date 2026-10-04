@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 import time
-from typing import Any
+from typing import Any, ClassVar
 
 from homeassistant.components.select import SelectEntity
 from homeassistant.config_entries import ConfigEntry
@@ -28,7 +28,9 @@ from .const import (
 _LOGGER = logging.getLogger(__name__)
 
 
-def _fresh_powerwall_local_snapshot(hass: HomeAssistant, entry: ConfigEntry) -> Any | None:
+def _fresh_powerwall_local_snapshot(
+    hass: HomeAssistant, entry: ConfigEntry
+) -> Any | None:
     """Return fresh local Powerwall data when paired, otherwise None."""
     if not entry.data.get(CONF_POWERWALL_LOCAL_PAIRED):
         return None
@@ -81,7 +83,9 @@ async def async_setup_entry(
 
     for key, object_id in desired_object_ids.items():
         unique_id = f"{entry.entry_id}_{key}"
-        current_entity_id = ent_reg.async_get_entity_id("select", entry.domain, unique_id)
+        current_entity_id = ent_reg.async_get_entity_id(
+            "select", entry.domain, unique_id
+        )
         if current_entity_id is None:
             continue
 
@@ -89,8 +93,14 @@ async def async_setup_entry(
         legacy_entity_id = legacy_entity_ids[key]
 
         # Only migrate the specific legacy ids -> desired ids.
-        if current_entity_id == legacy_entity_id and current_entity_id != desired_entity_id and ent_reg.async_get(desired_entity_id) is None:
-            ent_reg.async_update_entity(current_entity_id, new_entity_id=desired_entity_id)
+        if (
+            current_entity_id == legacy_entity_id
+            and current_entity_id != desired_entity_id
+            and ent_reg.async_get(desired_entity_id) is None
+        ):
+            ent_reg.async_update_entity(
+                current_entity_id, new_entity_id=desired_entity_id
+            )
 
     select_entities = [
         Teslav1rDurationSelect(
@@ -109,15 +119,18 @@ async def async_setup_entry(
 
     # Tesla Energy Site selects (universally supported — no capability probe needed)
     from .const import CONF_TESLA_ENERGY_SITE_ID
+
     tesla_site_id = entry.options.get(
         CONF_TESLA_ENERGY_SITE_ID,
         entry.data.get(CONF_TESLA_ENERGY_SITE_ID, ""),
     )
     if tesla_site_id:
-        select_entities.extend([
-            TeslaOperationModeSelect(hass=hass, entry=entry),
-            TeslaGridExportRuleSelect(hass=hass, entry=entry),
-        ])
+        select_entities.extend(
+            [
+                TeslaOperationModeSelect(hass=hass, entry=entry),
+                TeslaGridExportRuleSelect(hass=hass, entry=entry),
+            ]
+        )
 
     async_add_entities(select_entities)
 
@@ -129,7 +142,9 @@ class Teslav1rDurationSelect(SelectEntity):
     _attr_icon = "mdi:clock-outline"
     _attr_has_entity_name = True
 
-    def __init__(self, entry: ConfigEntry, key: str, name: str, suggested_object_id: str) -> None:
+    def __init__(
+        self, entry: ConfigEntry, key: str, name: str, suggested_object_id: str
+    ) -> None:
         self._entry_id = entry.entry_id
         self._key = key
         self._attr_name = name
@@ -170,7 +185,9 @@ class Teslav1rDurationSelect(SelectEntity):
             self.async_write_ha_state()
             return
 
-        entry_data = self.hass.data.setdefault(DOMAIN, {}).setdefault(self._entry_id, {})
+        entry_data = self.hass.data.setdefault(DOMAIN, {}).setdefault(
+            self._entry_id, {}
+        )
         entry_data["_skip_reload"] = True
 
         new_options = dict(entry.options)
@@ -233,15 +250,20 @@ class _TeslaSiteSelectBase(SelectEntity):
 class TeslaOperationModeSelect(_TeslaSiteSelectBase):
     """Powerwall operation mode: Time-of-Use, Self-Consumption, or Backup-Only."""
 
-    _OPTIONS = ["autonomous", "self_consumption", "backup"]
+    _OPTIONS: ClassVar[tuple[str, ...]] = (
+        "autonomous",
+        "self_consumption",
+        "backup",
+    )
 
     def __init__(self, hass: HomeAssistant, entry: ConfigEntry) -> None:
         super().__init__(
-            hass, entry,
+            hass,
+            entry,
             key="tesla_operation_mode",
             name="Operation Mode",
             icon="mdi:cog-transfer",
-            options=self._OPTIONS,
+            options=list(self._OPTIONS),
         )
 
     @property
@@ -270,15 +292,16 @@ class TeslaOperationModeSelect(_TeslaSiteSelectBase):
 class TeslaGridExportRuleSelect(_TeslaSiteSelectBase):
     """Grid export rule: never / pv_only / battery_ok."""
 
-    _OPTIONS = ["never", "pv_only", "battery_ok"]
+    _OPTIONS: ClassVar[tuple[str, ...]] = ("never", "pv_only", "battery_ok")
 
     def __init__(self, hass: HomeAssistant, entry: ConfigEntry) -> None:
         super().__init__(
-            hass, entry,
+            hass,
+            entry,
             key="tesla_grid_export_rule",
             name="Grid Export Rule",
             icon="mdi:transmission-tower-export",
-            options=self._OPTIONS,
+            options=list(self._OPTIONS),
         )
 
     @property

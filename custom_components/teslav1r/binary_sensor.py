@@ -1,5 +1,4 @@
-"""Binary sensor platform for PowerSync integration — Tesla Energy Site status."""
-from __future__ import annotations
+"""Binary sensor platform for Tesla v1r integration — Tesla Energy Site status."""
 
 import asyncio
 import logging
@@ -52,7 +51,7 @@ async def async_setup_entry(
     entry: ConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ) -> None:
-    """Set up PowerSync binary sensors."""
+    """Set up Tesla v1r binary sensors."""
     tesla_site_id = entry.options.get(
         CONF_TESLA_ENERGY_SITE_ID,
         entry.data.get(CONF_TESLA_ENERGY_SITE_ID, ""),
@@ -79,16 +78,21 @@ async def async_setup_entry(
         async_add_entities([PowerwallCriticalAlertBinarySensor(hass, entry)])
 
     # Universally-available Tesla site sensors (no capability probe needed).
-    async_add_entities([
-        GridServicesActiveBinarySensor(hass, entry),
-        CalibrationActiveBinarySensor(hass, entry),
-        PermissionToOperateBinarySensor(hass, entry),
-    ])
+    async_add_entities(
+        [
+            GridServicesActiveBinarySensor(hass, entry),
+            CalibrationActiveBinarySensor(hass, entry),
+            PermissionToOperateBinarySensor(hass, entry),
+        ]
+    )
 
     async def _add_capability_gated_binary_sensors() -> None:
         entry_data = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
         waited = 0.0
-        while "tesla_capabilities" not in entry_data and waited < TESLA_CAPABILITY_WAIT_SECONDS:
+        while (
+            "tesla_capabilities" not in entry_data
+            and waited < TESLA_CAPABILITY_WAIT_SECONDS
+        ):
             await asyncio.sleep(2.0)
             waited += 2.0
             entry_data = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
@@ -157,7 +161,8 @@ class StormWatchActiveBinarySensor(_TeslaBinarySensorBase):
 
     def __init__(self, hass: HomeAssistant, entry: ConfigEntry) -> None:
         super().__init__(
-            hass, entry,
+            hass,
+            entry,
             key="tesla_storm_watch_active",
             name="Storm Watch Active",
             icon="mdi:weather-lightning-rainy",
@@ -185,7 +190,8 @@ class ManualExportOverrideBinarySensor(_TeslaBinarySensorBase):
 
     def __init__(self, hass: HomeAssistant, entry: ConfigEntry) -> None:
         super().__init__(
-            hass, entry,
+            hass,
+            entry,
             key="tesla_manual_export_override",
             name="Manual Export Override",
             icon="mdi:hand-back-right",
@@ -222,7 +228,8 @@ class PowerwallCriticalAlertBinarySensor(_PowerwallLocalBinarySensorBase):
 
     def __init__(self, hass: HomeAssistant, entry: ConfigEntry) -> None:
         super().__init__(
-            hass, entry,
+            hass,
+            entry,
             key="pw_critical_alert",
             name="Powerwall Alert Active",
             icon="mdi:alert-octagon",
@@ -268,7 +275,8 @@ class PowerwallLocalPairedBinarySensor(_TeslaBinarySensorBase):
 
     def __init__(self, hass: HomeAssistant, entry: ConfigEntry) -> None:
         super().__init__(
-            hass, entry,
+            hass,
+            entry,
             key="powerwall_local_paired",
             name="Powerwall Local Paired",
             icon="mdi:key-variant",
@@ -290,7 +298,8 @@ class GridServicesActiveBinarySensor(_TeslaBinarySensorBase):
 
     def __init__(self, hass: HomeAssistant, entry: ConfigEntry) -> None:
         super().__init__(
-            hass, entry,
+            hass,
+            entry,
             key="tesla_grid_services_active",
             name="Grid Services Active",
             icon="mdi:transmission-tower-export",
@@ -309,7 +318,7 @@ class GridServicesActiveBinarySensor(_TeslaBinarySensorBase):
 
 
 class CalibrationActiveBinarySensor(_PowerwallLocalBinarySensorBase):
-    """True when PowerSync has detected a Powerwall calibration cycle.
+    """True when Tesla v1r has detected a Powerwall calibration cycle.
 
     The optimiser flips ``calibration_suspected`` after repeated mode-toggle
     failures (Powerwall ignoring commands while it self-calibrates). Surfacing
@@ -321,7 +330,8 @@ class CalibrationActiveBinarySensor(_PowerwallLocalBinarySensorBase):
 
     def __init__(self, hass: HomeAssistant, entry: ConfigEntry) -> None:
         super().__init__(
-            hass, entry,
+            hass,
+            entry,
             key="tesla_calibration_active",
             name="Calibration Active",
             icon="mdi:battery-sync",
@@ -367,7 +377,8 @@ class PermissionToOperateBinarySensor(_TeslaBinarySensorBase):
 
     def __init__(self, hass: HomeAssistant, entry: ConfigEntry) -> None:
         super().__init__(
-            hass, entry,
+            hass,
+            entry,
             key="tesla_permission_to_operate",
             name="Permission to Operate",
             icon="mdi:check-decagram",
@@ -410,7 +421,8 @@ class PowerwallLocalIPMissingBinarySensor(_TeslaBinarySensorBase):
 
     def __init__(self, hass: HomeAssistant, entry: ConfigEntry) -> None:
         super().__init__(
-            hass, entry,
+            hass,
+            entry,
             key="powerwall_local_ip_missing",
             name="Powerwall Gateway IP Missing",
             icon="mdi:lan-disconnect",
@@ -448,7 +460,8 @@ class PowerwallLocalIslandedBinarySensor(_PowerwallLocalBinarySensorBase):
 
     def __init__(self, hass: HomeAssistant, entry: ConfigEntry) -> None:
         super().__init__(
-            hass, entry,
+            hass,
+            entry,
             key="powerwall_local_islanded",
             name="Powerwall Off-Grid",
             icon="mdi:transmission-tower-off",

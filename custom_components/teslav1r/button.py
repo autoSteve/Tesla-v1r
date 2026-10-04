@@ -2,17 +2,14 @@
 
 Two buttons, both attached to the Battery device card:
 
-- ``button.power_sync_pair_powerwall_gateway`` kicks off the same pairing flow
-  the PowerSync mobile app uses (RSA-4096 keypair generation → Fleet API
-  ``add_authorized_client_request`` → 120s polling for VERIFIED). Persistent
-  notifications guide the user through the physical DC isolator toggle and
-  surface success / timeout / failure outcomes.
+- ``button.tesla_v1r_pair_powerwall_gateway`` kicks off the pairing flow
+  (RSA-4096 keypair generation → Fleet API ``add_authorized_client_request``
+  → 120s polling for VERIFIED). Persistent  notifications guide the user
+  through the physical DC isolator toggle and surface success / timeout
+  / failure outcomes.
 
-- ``button.power_sync_unpair_powerwall_gateway`` clears stored key material
+- ``button.tesla_v1r_unpair_powerwall_gateway`` clears stored key material
   and the paired flag, falling all command paths back to the Fleet API.
-
-Letting users start pairing from inside HA — without the mobile app — closes
-the gap for users who never installed the app or have lost access to it.
 """
 
 from __future__ import annotations
@@ -45,7 +42,7 @@ from .const import (
 
 _LOGGER = logging.getLogger(__name__)
 
-NOTIF_ID_PAIR_PROGRESS = "power_sync_pair_progress"
+NOTIF_ID_PAIR_PROGRESS = "tesla_v1r_pair_progress"
 
 
 async def async_setup_entry(
@@ -119,9 +116,7 @@ class PowerwallPairButton(_PowerwallPairButtonBase):
         return not (mgr is not None and mgr.is_running)
 
     async def async_press(self) -> None:
-        already_paired = bool(
-            self._entry.data.get(CONF_POWERWALL_LOCAL_PAIRED)
-        )
+        already_paired = bool(self._entry.data.get(CONF_POWERWALL_LOCAL_PAIRED))
         if already_paired:
             now = time.time()
             if (
@@ -228,7 +223,7 @@ async def _start_pairing_with_notifications(
         await _notify(
             hass,
             "Powerwall Pairing",
-            "❌ Tesla API not configured. Finish PowerSync setup first.",
+            "❌ Tesla API not configured. Finish Tesla v1r setup first.",
         )
         return
 

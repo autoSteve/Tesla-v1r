@@ -1,4 +1,4 @@
-"""Switch platform for PowerSync integration."""
+"""Switch platform for Tesla v1r integration."""
 
 import asyncio
 import logging
@@ -19,19 +19,15 @@ from .const import (
     ATTR_SYNC_STATUS,
     BATTERY_SYSTEM_TESLA,
     CONF_AUTO_SYNC_ENABLED,
-    CONF_AUTO_UPDATE_ENABLED,
-    CONF_AUTO_UPDATE_TIME,
     CONF_BATTERY_SYSTEM,
     CONF_FORCE_CHARGE_DURATION,
     CONF_FORCE_DISCHARGE_DURATION,
     CONF_POWERWALL_LOCAL_PAIRED,
     CONF_TESLA_ENERGY_SITE_ID,
-    DEFAULT_AUTO_UPDATE_TIME,
     DEFAULT_DISCHARGE_DURATION,
     DOMAIN,
     POWERWALL_LOCAL_POLL_INTERVAL,
     SENSOR_FAMILY_BATTERY,
-    SENSOR_FAMILY_CONTROLS,
     SENSOR_FAMILY_LP_OPTIMIZER,
     SWITCH_TYPE_FORCE_CHARGE,
     SWITCH_TYPE_FORCE_DISCHARGE,
@@ -155,7 +151,7 @@ async def async_setup_entry(
     entry: ConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ) -> None:
-    """Set up PowerSync switch entities."""
+    """Set up Tesla v1r switch entities."""
     # Detect Tesla by checking if tesla_energy_site_id is configured
     tesla_site_id = entry.options.get(
         CONF_TESLA_ENERGY_SITE_ID, entry.data.get(CONF_TESLA_ENERGY_SITE_ID, "")
@@ -367,96 +363,6 @@ class AutoSyncSwitch(SwitchEntity):
             attrs[ATTR_SYNC_STATUS] = "enabled" if self.is_on else "disabled"
 
         return attrs
-
-
-class AutoUpdateSwitch(SwitchEntity):
-    """Switch to enable/disable scheduled PowerSync HACS updates."""
-
-    _attr_has_entity_name = True
-    _attr_entity_category = EntityCategory.CONFIG
-
-    def __init__(
-        self,
-        hass: HomeAssistant,
-        entry: ConfigEntry,
-        description: SwitchEntityDescription,
-    ) -> None:
-        """Initialize the switch."""
-        self.hass = hass
-        self.entity_description = description
-        self._entry = entry
-        self._attr_unique_id = f"{entry.entry_id}_{description.key}"
-        self._attr_suggested_object_id = f"tesla_v1r_{description.key}"
-        self._attr_is_on = entry.options.get(
-            CONF_AUTO_UPDATE_ENABLED,
-            entry.data.get(CONF_AUTO_UPDATE_ENABLED, False),
-        )
-
-    @property
-    def device_info(self):
-        return family_device_info(self._entry.entry_id, SENSOR_FAMILY_CONTROLS)
-
-    async def async_added_to_hass(self) -> None:
-        """Publish scheduler decisions recorded outside the switch entity."""
-        self.async_on_remove(
-            async_dispatcher_connect(
-                self.hass,
-                f"{DOMAIN}_{self._entry.entry_id}_auto_update_state",
-                self._handle_auto_update_state,
-            )
-        )
-
-    @callback
-    def _handle_auto_update_state(self) -> None:
-        """Refresh diagnostic attributes after each scheduler decision."""
-        self.async_write_ha_state()
-
-    @property
-    def is_on(self) -> bool:
-        """Return True if scheduled auto-update is enabled."""
-        return self._attr_is_on
-
-    async def async_turn_on(self, **kwargs: Any) -> None:
-        """Turn scheduled auto-update on."""
-        _LOGGER.info("Enabling scheduled PowerSync auto-update")
-        self._attr_is_on = True
-        new_options = {**self._entry.options}
-        new_options[CONF_AUTO_UPDATE_ENABLED] = True
-        new_options.setdefault(CONF_AUTO_UPDATE_TIME, DEFAULT_AUTO_UPDATE_TIME)
-        self.hass.config_entries.async_update_entry(
-            self._entry,
-            options=new_options,
-        )
-        self.async_write_ha_state()
-
-    async def async_turn_off(self, **kwargs: Any) -> None:
-        """Turn scheduled auto-update off."""
-        _LOGGER.info("Disabling scheduled PowerSync auto-update")
-        self._attr_is_on = False
-        new_options = {**self._entry.options}
-        new_options[CONF_AUTO_UPDATE_ENABLED] = False
-        self.hass.config_entries.async_update_entry(
-            self._entry,
-            options=new_options,
-        )
-        self.async_write_ha_state()
-
-    @property
-    def extra_state_attributes(self) -> dict[str, Any]:
-        """Return additional attributes."""
-        entry_data = self.hass.data.get(DOMAIN, {}).get(self._entry.entry_id, {})
-        return {
-            "scheduled_time": self._entry.options.get(
-                CONF_AUTO_UPDATE_TIME,
-                self._entry.data.get(CONF_AUTO_UPDATE_TIME, DEFAULT_AUTO_UPDATE_TIME),
-            ),
-            "last_run": entry_data.get("auto_update_last_run"),
-            "last_result": entry_data.get("auto_update_last_result"),
-            "last_update_entity": entry_data.get("auto_update_last_entity"),
-            "last_check_at": entry_data.get("auto_update_last_check_at"),
-            "last_check_decision": entry_data.get("auto_update_last_check_decision"),
-        }
-
 
 class ForceDischargeSwitch(SwitchEntity):
     """Switch to manually force battery discharge mode."""

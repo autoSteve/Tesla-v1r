@@ -599,7 +599,6 @@ PLATFORMS: list[Platform] = [
     Platform.NUMBER,
     Platform.BINARY_SENSOR,
     Platform.BUTTON,
-    Platform.UPDATE,
 ]
 
 CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
