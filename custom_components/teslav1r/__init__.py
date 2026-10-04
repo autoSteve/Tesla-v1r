@@ -987,15 +987,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 _err,
             )
 
-    from .auto_update import async_setup_auto_update
-
-    hass.data[DOMAIN][entry.entry_id][
-        "auto_update_cancel"
-    ] = await async_setup_auto_update(
-        hass,
-        entry,
-    )
-
     # Track firmware version for change notifications (Tesla only)
     if tesla_coordinator:
         last_known_firmware = stored_data.get("last_known_firmware")
