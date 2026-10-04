@@ -1,5 +1,4 @@
 """Switch platform for PowerSync integration."""
-from __future__ import annotations
 
 import asyncio
 import logging
@@ -16,62 +15,31 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.event import async_track_time_interval
 
 from .const import (
-    DOMAIN,
+    ATTR_LAST_SYNC,
+    ATTR_SYNC_STATUS,
+    BATTERY_SYSTEM_TESLA,
     CONF_AUTO_SYNC_ENABLED,
     CONF_AUTO_UPDATE_ENABLED,
     CONF_AUTO_UPDATE_TIME,
     CONF_BATTERY_SYSTEM,
     CONF_FORCE_CHARGE_DURATION,
     CONF_FORCE_DISCHARGE_DURATION,
-    DEFAULT_AUTO_UPDATE_TIME,
-    CONF_ELECTRICITY_PROVIDER,
-    CONF_MONITORING_MODE,
-    CONF_OPTIMIZATION_AUTO_APPLY_RESERVE,
-    CONF_OPTIMIZATION_BACKUP_RESERVE,
-    CONF_OPTIMIZATION_DISABLE_IDLE,
-    CONF_OPTIMIZATION_ENABLED,
-    CONF_OPTIMIZATION_MANUAL_RESERVE,
-    CONF_OPTIMIZATION_PROVIDER,
-    CONF_OPTIMIZATION_SPREAD_EXPORT_ENABLED,
-    CONF_OPTIMIZATION_SPREAD_IMPORT_ENABLED,
     CONF_POWERWALL_LOCAL_PAIRED,
-    CONF_SIGENERGY_STATION_ID,
-    CONF_SUNGROW_CONNECTION_TYPE,
     CONF_TESLA_ENERGY_SITE_ID,
-    BATTERY_SYSTEM_TESLA,
-    SUNGROW_CONNECTION_DIRECT,
-    SUNGROW_CONNECTION_IHOMEMANAGER,
-    OPT_PROVIDER_POWERSYNC,
-    TARGET_CHARGE_POWER_BATTERY_SYSTEMS,
-    TARGET_EXPORT_POWER_BATTERY_SYSTEMS,
-    SWITCH_TYPE_AUTO_SYNC,
-    SWITCH_TYPE_AUTO_UPDATE,
-    SWITCH_TYPE_FORCE_DISCHARGE,
-    SWITCH_TYPE_FORCE_CHARGE,
-    SWITCH_TYPE_MONITORING_MODE,
-    SWITCH_TYPE_AWAY_MODE,
-    SWITCH_TYPE_PROFIT_MAX_MODE,
-    SWITCH_TYPE_COST_NEUTRAL,
-    SWITCH_TYPE_CHARGE_BY_TIME,
-    SWITCH_TYPE_OPTIMIZATION_DISABLE_IDLE,
-    SWITCH_TYPE_OPTIMIZATION_SPREAD_EXPORT,
-    SWITCH_TYPE_OPTIMIZATION_SPREAD_IMPORT,
-    SWITCH_TYPE_OPTIMIZATION_ENABLED,
-    SWITCH_TYPE_OPTIMIZATION_AUTO_APPLY_RESERVE,
-    SERVICE_RESTORE_NORMAL,
+    DEFAULT_AUTO_UPDATE_TIME,
     DEFAULT_DISCHARGE_DURATION,
-    ATTR_LAST_SYNC,
-    ATTR_SYNC_STATUS,
-    family_device_info,
-    SENSOR_FAMILY_LP_OPTIMIZER,
+    DOMAIN,
+    POWERWALL_LOCAL_POLL_INTERVAL,
     SENSOR_FAMILY_BATTERY,
     SENSOR_FAMILY_CONTROLS,
-    TESLA_SITE_INFO_CONTROL_MAX_AGE_SECONDS,
-    TESLA_LOCAL_CONTROL_MAX_AGE_SECONDS,
+    SENSOR_FAMILY_LP_OPTIMIZER,
+    SWITCH_TYPE_FORCE_CHARGE,
+    SWITCH_TYPE_FORCE_DISCHARGE,
     TESLA_CAPABILITY_WAIT_SECONDS,
-    POWERWALL_LOCAL_POLL_INTERVAL,
+    TESLA_LOCAL_CONTROL_MAX_AGE_SECONDS,
+    TESLA_SITE_INFO_CONTROL_MAX_AGE_SECONDS,
+    family_device_info,
 )
-from .monitoring import async_prepare_monitoring_handoff, finish_monitoring_handoff
 from .tesla_grid_control import tesla_grid_charging_enabled_from_site_info
 
 # Providers that use TOU schedule syncing (Amber, Octopus, Flow Power)
@@ -146,13 +114,13 @@ def _state_float(hass: HomeAssistant, entity_id: str) -> float | None:
 
 def _selected_force_power_w(hass: HomeAssistant) -> int:
     """Read the force-power selector and convert it to service power_w."""
-    watts = _state_float(hass, "number.power_sync_force_power_w")
+    watts = _state_float(hass, "number.tesla_v1r_force_power_w")
     if watts is not None and watts > 0:
-        return int(round(watts))
+        return round(watts)
 
-    kw = _state_float(hass, "number.power_sync_force_power_kw")
+    kw = _state_float(hass, "number.tesla_v1r_force_power_kw")
     if kw is not None and kw > 0:
-        return int(round(kw * 1000))
+        return round(kw * 1000)
 
     return 0
 
@@ -190,189 +158,65 @@ async def async_setup_entry(
     """Set up PowerSync switch entities."""
     # Detect Tesla by checking if tesla_energy_site_id is configured
     tesla_site_id = entry.options.get(
-        CONF_TESLA_ENERGY_SITE_ID,
-        entry.data.get(CONF_TESLA_ENERGY_SITE_ID, "")
+        CONF_TESLA_ENERGY_SITE_ID, entry.data.get(CONF_TESLA_ENERGY_SITE_ID, "")
     )
     is_tesla = bool(tesla_site_id)
 
-    # Detect electricity provider for TOU sync relevance
-    electricity_provider = entry.options.get(
-        CONF_ELECTRICITY_PROVIDER,
-        entry.data.get(CONF_ELECTRICITY_PROVIDER, "amber")
-    )
-    has_tou_sync = electricity_provider in PROVIDERS_WITH_TOU_SYNC
     battery_system = entry.options.get(
         CONF_BATTERY_SYSTEM,
         entry.data.get(CONF_BATTERY_SYSTEM, BATTERY_SYSTEM_TESLA),
     )
-    auto_sync_name = (
-        "Auto-Sync TOU Schedule"
-        if battery_system == BATTERY_SYSTEM_TESLA
-        else "Auto-Sync Tariff Prices"
-    )
 
     _LOGGER.info(
-        "🔋 Switch setup: is_tesla=%s, battery_system=%s, provider=%s, has_tou_sync=%s",
+        "🔋 Switch setup: is_tesla=%s, battery_system=%s",
         is_tesla,
         battery_system,
-        electricity_provider,
-        has_tou_sync,
     )
 
     entities = []
 
-    entities.append(
-        AutoUpdateSwitch(
-            hass=hass,
-            entry=entry,
-            description=SwitchEntityDescription(
-                key=SWITCH_TYPE_AUTO_UPDATE,
-                name="Auto-Update PowerSync",
-                icon="mdi:update",
-            ),
-        ),
-    )
-
-    entities.append(
-        OptimizationEnabledSwitch(
-            hass=hass,
-            entry=entry,
-            description=SwitchEntityDescription(
-                key=SWITCH_TYPE_OPTIMIZATION_ENABLED,
-                name="Enable Smart Optimization",
-                icon="mdi:chart-timeline-variant-shimmer",
-            ),
-        ),
-    )
-
-    entities.append(
-        AutoApplyOptimizerReserveSwitch(
-            hass=hass,
-            entry=entry,
-            description=SwitchEntityDescription(
-                key=SWITCH_TYPE_OPTIMIZATION_AUTO_APPLY_RESERVE,
-                name="Auto-Apply Optimizer Reserve",
-                icon="mdi:battery-sync-outline",
-            ),
-        ),
-    )
-
-    # Monitoring mode switch — always available for all battery systems
-    entities.append(
-        MonitoringModeSwitch(
-            hass=hass,
-            entry=entry,
-            description=SwitchEntityDescription(
-                key=SWITCH_TYPE_MONITORING_MODE,
-                name="Monitoring Mode",
-                icon="mdi:eye-outline",
-            ),
-        ),
-    )
-
     # Manual force controls are service wrappers and are available for every
-    # battery system supported by power_sync.force_charge/force_discharge.
-    entities.extend([
-        ForceDischargeSwitch(
-            hass=hass,
-            entry=entry,
-            description=SwitchEntityDescription(
-                key=SWITCH_TYPE_FORCE_DISCHARGE,
-                name="Force Discharge",
-                icon="mdi:battery-arrow-up",
-            ),
-        ),
-        ForceChargeSwitch(
-            hass=hass,
-            entry=entry,
-            description=SwitchEntityDescription(
-                key=SWITCH_TYPE_FORCE_CHARGE,
-                name="Force Charge",
-                icon="mdi:battery-arrow-down",
-            ),
-        ),
-    ])
-
-    # Only add auto-sync switch for providers that actually sync TOU schedules
-    if has_tou_sync:
-        entities.append(
-            AutoSyncSwitch(
+    # battery system supported by tesla_v1r.force_charge/force_discharge.
+    entities.append(
+        [
+            ForceDischargeSwitch(
                 hass=hass,
                 entry=entry,
                 description=SwitchEntityDescription(
-                    key=SWITCH_TYPE_AUTO_SYNC,
-                    name=auto_sync_name,
-                    icon="mdi:sync",
+                    key=SWITCH_TYPE_FORCE_DISCHARGE,
+                    name="Force Discharge",
+                    icon="mdi:battery-arrow-up",
                 ),
             ),
-        )
+            ForceChargeSwitch(
+                hass=hass,
+                entry=entry,
+                description=SwitchEntityDescription(
+                    key=SWITCH_TYPE_FORCE_CHARGE,
+                    name="Force Charge",
+                    icon="mdi:battery-arrow-down",
+                ),
+            ),
+        ]
+    )
 
     # Add Tesla-specific switches only if Tesla is selected as battery system
     if is_tesla:
         _LOGGER.info("Tesla battery system detected - adding Tesla-specific switches")
-        entities.extend([
-            GridChargingSwitch(hass=hass, entry=entry),
-        ])
+        entities.extend(
+            [
+                GridChargingSwitch(hass=hass, entry=entry),
+            ]
+        )
 
     # Off-grid switch — available when Powerwall is paired for local control
     if is_tesla and entry.data.get(CONF_POWERWALL_LOCAL_PAIRED):
-        entities.extend([
-            OffGridSwitch(hass=hass, entry=entry),
-            OnGridSwitch(hass=hass, entry=entry),
-        ])
-
-    # Away Mode and optimizer mode switches — added later via deferred callbacks once
-    # the OptimizationCoordinator is created (it's set up after platforms start).
-    def _add_away_mode_switch(coordinator: Any) -> None:
-        async_add_entities([AwayModeSwitch(hass=hass, entry=entry, coordinator=coordinator)])
-
-    hass.data.setdefault(DOMAIN, {}).setdefault(entry.entry_id, {})[
-        "switch_add_away_mode"
-    ] = _add_away_mode_switch
-
-    def _add_profit_max_switch(coordinator: Any) -> None:
-        async_add_entities([ProfitMaxModeSwitch(hass=hass, entry=entry, coordinator=coordinator)])
-
-    hass.data[DOMAIN][entry.entry_id]["switch_add_profit_max"] = _add_profit_max_switch
-
-    def _add_cost_neutral_switch(coordinator: Any) -> None:
-        async_add_entities([
-            CostNeutralSwitch(hass=hass, entry=entry, coordinator=coordinator)
-        ])
-
-    hass.data[DOMAIN][entry.entry_id]["switch_add_cost_neutral"] = (
-        _add_cost_neutral_switch
-    )
-
-    def _add_charge_by_time_switch(coordinator: Any) -> None:
-        async_add_entities([ChargeByTimeSwitch(hass=hass, entry=entry, coordinator=coordinator)])
-
-    hass.data[DOMAIN][entry.entry_id]["switch_add_charge_by_time"] = _add_charge_by_time_switch
-
-    def _add_disable_idle_switch(coordinator: Any) -> None:
-        async_add_entities([
-            DisableIdleModeSwitch(hass=hass, entry=entry, coordinator=coordinator)
-        ])
-
-    hass.data[DOMAIN][entry.entry_id]["switch_add_disable_idle"] = (
-        _add_disable_idle_switch
-    )
-
-    if battery_system in TARGET_EXPORT_POWER_BATTERY_SYSTEMS:
-        def _add_spread_export_switch(coordinator: Any) -> None:
-            async_add_entities([
-                SpreadExportSwitch(hass=hass, entry=entry, coordinator=coordinator)
-            ])
-
-        hass.data[DOMAIN][entry.entry_id]["switch_add_spread_export"] = _add_spread_export_switch
-
-    if battery_system in TARGET_CHARGE_POWER_BATTERY_SYSTEMS:
-        def _add_spread_import_switch(coordinator: Any) -> None:
-            async_add_entities([
-                SpreadImportSwitch(hass=hass, entry=entry, coordinator=coordinator)
-            ])
-
-        hass.data[DOMAIN][entry.entry_id]["switch_add_spread_import"] = _add_spread_import_switch
+        entities.extend(
+            [
+                OffGridSwitch(hass=hass, entry=entry),
+                OnGridSwitch(hass=hass, entry=entry),
+            ]
+        )
 
     async_add_entities(entities)
 
@@ -381,10 +225,14 @@ async def async_setup_entry(
     # which runs ~after the first site_info fetch. We wait for that in a
     # background task and add them once.
     if is_tesla:
+
         async def _add_capability_gated_switches() -> None:
             entry_data = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
             waited = 0.0
-            while "tesla_capabilities" not in entry_data and waited < TESLA_CAPABILITY_WAIT_SECONDS:
+            while (
+                "tesla_capabilities" not in entry_data
+                and waited < TESLA_CAPABILITY_WAIT_SECONDS
+            ):
                 await asyncio.sleep(2.0)
                 waited += 2.0
                 entry_data = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
@@ -412,7 +260,9 @@ async def async_setup_entry(
                     "Adding %d capability-gated Tesla switches (storm_mode=%s, vpp=%d)",
                     len(to_add),
                     caps.get("storm_mode"),
-                    len(getattr(tesla_coord, "_vpp_programs_cache", None) or []) if tesla_coord else 0,
+                    len(getattr(tesla_coord, "_vpp_programs_cache", None) or [])
+                    if tesla_coord
+                    else 0,
                 )
                 async_add_entities(to_add)
 
@@ -440,7 +290,7 @@ class AutoSyncSwitch(SwitchEntity):
         self._entry = entry
         self._attr_unique_id = f"{entry.entry_id}_{description.key}"
         # HA 2026.2.0+ requires lowercase suggested_object_id
-        self._attr_suggested_object_id = f"power_sync_{description.key}"
+        self._attr_suggested_object_id = f"tesla_v1r_{description.key}"
 
         # Initialize state from config
         self._attr_is_on = entry.options.get(
@@ -462,8 +312,11 @@ class AutoSyncSwitch(SwitchEntity):
         # Log context to help debug if triggered by automation vs user
         context = kwargs.get("context")
         if context:
-            _LOGGER.info("Auto-sync switch activated (context: user_id=%s, parent_id=%s)",
-                        context.user_id, context.parent_id)
+            _LOGGER.info(
+                "Auto-sync switch activated (context: user_id=%s, parent_id=%s)",
+                context.user_id,
+                context.parent_id,
+            )
         else:
             _LOGGER.info("Auto-sync switch activated (no context - likely UI action)")
         _LOGGER.info("Enabling automatic TOU schedule syncing")
@@ -533,7 +386,7 @@ class AutoUpdateSwitch(SwitchEntity):
         self.entity_description = description
         self._entry = entry
         self._attr_unique_id = f"{entry.entry_id}_{description.key}"
-        self._attr_suggested_object_id = f"power_sync_{description.key}"
+        self._attr_suggested_object_id = f"tesla_v1r_{description.key}"
         self._attr_is_on = entry.options.get(
             CONF_AUTO_UPDATE_ENABLED,
             entry.data.get(CONF_AUTO_UPDATE_ENABLED, False),
@@ -605,205 +458,6 @@ class AutoUpdateSwitch(SwitchEntity):
         }
 
 
-class OptimizationEnabledSwitch(SwitchEntity):
-    """Switch to enable/disable the built-in Smart Optimization coordinator."""
-
-    _attr_has_entity_name = True
-    _attr_entity_category = EntityCategory.CONFIG
-
-    def __init__(
-        self,
-        hass: HomeAssistant,
-        entry: ConfigEntry,
-        description: SwitchEntityDescription,
-    ) -> None:
-        """Initialize the switch."""
-        self.hass = hass
-        self.entity_description = description
-        self._entry = entry
-        self._attr_unique_id = f"{entry.entry_id}_{description.key}"
-        self._attr_suggested_object_id = f"power_sync_{description.key}"
-        self._attr_is_on = self._current_enabled_state()
-
-    def _current_enabled_state(self) -> bool:
-        """Return whether Smart Optimization is configured and enabled."""
-        provider = self._entry.options.get(
-            CONF_OPTIMIZATION_PROVIDER,
-            self._entry.data.get(CONF_OPTIMIZATION_PROVIDER),
-        )
-        default_enabled = provider == OPT_PROVIDER_POWERSYNC
-        return bool(
-            self._entry.options.get(
-                CONF_OPTIMIZATION_ENABLED,
-                self._entry.data.get(CONF_OPTIMIZATION_ENABLED, default_enabled),
-            )
-            and provider == OPT_PROVIDER_POWERSYNC
-        )
-
-    @property
-    def device_info(self):
-        return family_device_info(self._entry.entry_id, SENSOR_FAMILY_CONTROLS)
-
-    @property
-    def is_on(self) -> bool:
-        """Return True if Smart Optimization is enabled."""
-        return self._attr_is_on
-
-    async def async_turn_on(self, **kwargs: Any) -> None:
-        """Enable Smart Optimization and select the built-in LP provider."""
-        _LOGGER.info("Enabling Smart Optimization from HA switch")
-        self._attr_is_on = True
-        new_data = {**self._entry.data}
-        new_options = {**self._entry.options}
-        new_data[CONF_OPTIMIZATION_PROVIDER] = OPT_PROVIDER_POWERSYNC
-        new_options[CONF_OPTIMIZATION_PROVIDER] = OPT_PROVIDER_POWERSYNC
-        new_options[CONF_OPTIMIZATION_ENABLED] = True
-        self.hass.config_entries.async_update_entry(
-            self._entry,
-            data=new_data,
-            options=new_options,
-        )
-        self.async_write_ha_state()
-
-    async def async_turn_off(self, **kwargs: Any) -> None:
-        """Disable Smart Optimization while preserving saved LP settings."""
-        _LOGGER.info("Disabling Smart Optimization from HA switch")
-        self._attr_is_on = False
-        new_options = {**self._entry.options}
-        new_options[CONF_OPTIMIZATION_ENABLED] = False
-        self.hass.config_entries.async_update_entry(
-            self._entry,
-            options=new_options,
-        )
-        self.async_write_ha_state()
-
-
-class AutoApplyOptimizerReserveSwitch(SwitchEntity):
-    """Switch to let forecast recommendations update the optimizer reserve floor."""
-
-    _attr_has_entity_name = True
-    _attr_entity_category = EntityCategory.CONFIG
-
-    def __init__(
-        self,
-        hass: HomeAssistant,
-        entry: ConfigEntry,
-        description: SwitchEntityDescription,
-    ) -> None:
-        """Initialize the switch."""
-        self.hass = hass
-        self.entity_description = description
-        self._entry = entry
-        self._attr_unique_id = f"{entry.entry_id}_{description.key}"
-        self._attr_suggested_object_id = f"power_sync_{description.key}"
-        self._attr_is_on = self._current_state()
-
-    def _current_state(self) -> bool:
-        return bool(
-            self._entry.options.get(
-                CONF_OPTIMIZATION_AUTO_APPLY_RESERVE,
-                self._entry.data.get(CONF_OPTIMIZATION_AUTO_APPLY_RESERVE, False),
-            )
-        )
-
-    def _coordinator(self) -> Any | None:
-        entry_data = self.hass.data.get(DOMAIN, {}).get(self._entry.entry_id, {})
-        if isinstance(entry_data, dict):
-            return entry_data.get("optimization_coordinator")
-        return None
-
-    async def async_added_to_hass(self) -> None:
-        """Register for optimizer setting changes made outside this switch."""
-        self.async_on_remove(
-            async_dispatcher_connect(
-                self.hass,
-                f"{DOMAIN}_{self._entry.entry_id}_auto_apply_reserve",
-                self._handle_auto_apply_reserve_update,
-            )
-        )
-
-    @callback
-    def _handle_auto_apply_reserve_update(self, enabled: bool) -> None:
-        """Update the HA switch state after API/config-flow changes."""
-        self._attr_is_on = bool(enabled)
-        self.async_write_ha_state()
-
-    @property
-    def device_info(self):
-        return family_device_info(self._entry.entry_id, SENSOR_FAMILY_LP_OPTIMIZER)
-
-    @property
-    def is_on(self) -> bool:
-        """Return True if forecast reserve auto-apply is enabled."""
-        coordinator = self._coordinator()
-        if coordinator and hasattr(coordinator, "auto_apply_reserve_enabled"):
-            return bool(coordinator.auto_apply_reserve_enabled)
-        return self._attr_is_on
-
-    async def _persist_without_coordinator(self, enabled: bool) -> None:
-        new_data = {**self._entry.data}
-        new_options = {**self._entry.options}
-        current_reserve = new_options.get(
-            CONF_OPTIMIZATION_BACKUP_RESERVE,
-            new_data.get(CONF_OPTIMIZATION_BACKUP_RESERVE, 0.2),
-        )
-        try:
-            current_reserve = float(current_reserve)
-        except (TypeError, ValueError):
-            current_reserve = 0.2
-        if current_reserve > 1:
-            current_reserve = current_reserve / 100.0
-
-        manual_reserve = new_options.get(
-            CONF_OPTIMIZATION_MANUAL_RESERVE,
-            new_data.get(CONF_OPTIMIZATION_MANUAL_RESERVE),
-        )
-        try:
-            manual_reserve = (
-                float(manual_reserve)
-                if manual_reserve is not None
-                else current_reserve
-            )
-        except (TypeError, ValueError):
-            manual_reserve = current_reserve
-        if manual_reserve > 1:
-            manual_reserve = manual_reserve / 100.0
-
-        new_data[CONF_OPTIMIZATION_AUTO_APPLY_RESERVE] = bool(enabled)
-        new_options[CONF_OPTIMIZATION_AUTO_APPLY_RESERVE] = bool(enabled)
-        new_data[CONF_OPTIMIZATION_MANUAL_RESERVE] = manual_reserve
-        new_options[CONF_OPTIMIZATION_MANUAL_RESERVE] = manual_reserve
-        if not enabled:
-            new_data[CONF_OPTIMIZATION_BACKUP_RESERVE] = manual_reserve
-            new_options[CONF_OPTIMIZATION_BACKUP_RESERVE] = manual_reserve
-
-        self.hass.config_entries.async_update_entry(
-            self._entry,
-            data=new_data,
-            options=new_options,
-        )
-
-    async def async_turn_on(self, **kwargs: Any) -> None:
-        """Enable forecast-driven optimizer reserve updates."""
-        self._attr_is_on = True
-        coordinator = self._coordinator()
-        if coordinator and hasattr(coordinator, "set_auto_apply_reserve_enabled"):
-            await coordinator.set_auto_apply_reserve_enabled(True)
-        else:
-            await self._persist_without_coordinator(True)
-        self.async_write_ha_state()
-
-    async def async_turn_off(self, **kwargs: Any) -> None:
-        """Disable forecast-driven optimizer reserve updates and restore manual floor."""
-        self._attr_is_on = False
-        coordinator = self._coordinator()
-        if coordinator and hasattr(coordinator, "set_auto_apply_reserve_enabled"):
-            await coordinator.set_auto_apply_reserve_enabled(False)
-        else:
-            await self._persist_without_coordinator(False)
-        self.async_write_ha_state()
-
-
 class ForceDischargeSwitch(SwitchEntity):
     """Switch to manually force battery discharge mode."""
 
@@ -822,7 +476,7 @@ class ForceDischargeSwitch(SwitchEntity):
         self._entry = entry
         self._attr_unique_id = f"{entry.entry_id}_{description.key}"
         # HA 2026.2.0+ requires lowercase suggested_object_id
-        self._attr_suggested_object_id = f"power_sync_{description.key}"
+        self._attr_suggested_object_id = f"tesla_v1r_{description.key}"
         self._attr_is_on = False
         self._discharge_expires_at: datetime | None = None
         self._duration_minutes: int = DEFAULT_DISCHARGE_DURATION
@@ -871,11 +525,18 @@ class ForceDischargeSwitch(SwitchEntity):
         # Log context to help debug if triggered by automation vs user
         context = kwargs.get("context")
         if context:
-            _LOGGER.info("Force discharge switch activated (context: user_id=%s, parent_id=%s)",
-                        context.user_id, context.parent_id)
+            _LOGGER.info(
+                "Force discharge switch activated (context: user_id=%s, parent_id=%s)",
+                context.user_id,
+                context.parent_id,
+            )
         else:
-            _LOGGER.info("Force discharge switch activated (no context - likely UI action)")
-        _LOGGER.info("Activating force discharge mode for %d minutes", self._duration_minutes)
+            _LOGGER.info(
+                "Force discharge switch activated (no context - likely UI action)"
+            )
+        _LOGGER.info(
+            "Activating force discharge mode for %d minutes", self._duration_minutes
+        )
 
         # Get the duration from service call data if provided
         selected_duration = _selected_duration(
@@ -883,7 +544,8 @@ class ForceDischargeSwitch(SwitchEntity):
             CONF_FORCE_DISCHARGE_DURATION,
         )
         duration = _coerce_duration(
-            kwargs.get("duration", selected_duration), self._duration_minutes,
+            kwargs.get("duration", selected_duration),
+            self._duration_minutes,
         )
         # This entity is a user-facing manual control. Mark the nested service
         # call explicitly so Monitoring Mode does not mistake it for an
@@ -933,7 +595,8 @@ class ForceDischargeSwitch(SwitchEntity):
             """Check if discharge has expired."""
             if (
                 self._discharge_expires_at
-                and _datetime_now_for(self._discharge_expires_at) >= self._discharge_expires_at
+                and _datetime_now_for(self._discharge_expires_at)
+                >= self._discharge_expires_at
             ):
                 _LOGGER.info("Force discharge expired, restoring normal operation")
                 # The service-side expiry callback owns the physical restore.
@@ -993,7 +656,7 @@ class ForceChargeSwitch(SwitchEntity):
         self._entry = entry
         self._attr_unique_id = f"{entry.entry_id}_{description.key}"
         # HA 2026.2.0+ requires lowercase suggested_object_id
-        self._attr_suggested_object_id = f"power_sync_{description.key}"
+        self._attr_suggested_object_id = f"tesla_v1r_{description.key}"
         self._attr_is_on = False
         self._charge_expires_at: datetime | None = None
         self._duration_minutes: int = DEFAULT_DISCHARGE_DURATION  # Reuse same default
@@ -1039,7 +702,9 @@ class ForceChargeSwitch(SwitchEntity):
 
     async def async_turn_on(self, **kwargs: Any) -> None:
         """Turn on force charge mode."""
-        _LOGGER.info("Activating force charge mode for %d minutes", self._duration_minutes)
+        _LOGGER.info(
+            "Activating force charge mode for %d minutes", self._duration_minutes
+        )
 
         # Get the duration from service call data if provided
         selected_duration = _selected_duration(
@@ -1047,7 +712,8 @@ class ForceChargeSwitch(SwitchEntity):
             CONF_FORCE_CHARGE_DURATION,
         )
         duration = _coerce_duration(
-            kwargs.get("duration", selected_duration), self._duration_minutes,
+            kwargs.get("duration", selected_duration),
+            self._duration_minutes,
         )
         # This entity is a user-facing manual control. Mark the nested service
         # call explicitly so Monitoring Mode does not mistake it for an
@@ -1097,7 +763,8 @@ class ForceChargeSwitch(SwitchEntity):
             """Check if charge has expired."""
             if (
                 self._charge_expires_at
-                and _datetime_now_for(self._charge_expires_at) >= self._charge_expires_at
+                and _datetime_now_for(self._charge_expires_at)
+                >= self._charge_expires_at
             ):
                 _LOGGER.info("Force charge expired, restoring normal operation")
                 # The service-side expiry callback owns the physical restore.
@@ -1139,545 +806,19 @@ class ForceChargeSwitch(SwitchEntity):
             self._cancel_expiry_timer = None
 
 
-class MonitoringModeSwitch(SwitchEntity):
-    """Switch to enable monitoring-only mode (blocks all battery/inverter control)."""
-
-    _attr_has_entity_name = True
-    _attr_entity_category = EntityCategory.CONFIG
-
-    def __init__(
-        self,
-        hass: HomeAssistant,
-        entry: ConfigEntry,
-        description: SwitchEntityDescription,
-    ) -> None:
-        """Initialize the switch."""
-        self.hass = hass
-        self.entity_description = description
-        self._entry = entry
-        self._attr_unique_id = f"{entry.entry_id}_{description.key}"
-        self._attr_suggested_object_id = f"power_sync_{description.key}"
-
-        self._attr_is_on = self._current_value()
-
-    def _current_value(self) -> bool:
-        """Read the current config-entry option instead of a startup cache."""
-        if self._entry.options.get(
-            CONF_SUNGROW_CONNECTION_TYPE,
-            self._entry.data.get(
-                CONF_SUNGROW_CONNECTION_TYPE,
-                SUNGROW_CONNECTION_DIRECT,
-            ),
-        ) == SUNGROW_CONNECTION_IHOMEMANAGER:
-            return True
-        return bool(
-            self._entry.options.get(
-                CONF_MONITORING_MODE,
-                self._entry.data.get(CONF_MONITORING_MODE, False),
-            )
-        )
-
-    @property
-    def device_info(self):
-        return family_device_info(self._entry.entry_id, SENSOR_FAMILY_CONTROLS)
-
-    @property
-    def is_on(self) -> bool:
-        """Return True if monitoring mode is active."""
-        return self._current_value()
-
-    async def async_added_to_hass(self) -> None:
-        """Refresh state when monitoring mode is changed through the API/app."""
-        self.async_on_remove(
-            async_dispatcher_connect(
-                self.hass,
-                f"{DOMAIN}_{self._entry.entry_id}_monitoring_mode",
-                self._handle_monitoring_mode_update,
-            )
-        )
-
-    @callback
-    def _handle_monitoring_mode_update(self, enabled: bool) -> None:
-        """Update the HA state machine after API-driven changes."""
-        self._attr_is_on = bool(enabled)
-        self.async_write_ha_state()
-
-    async def async_turn_on(self, **kwargs: Any) -> None:
-        """Enable monitoring mode — all control commands will be logged but not executed."""
-        if self._current_value():
-            return
-        _LOGGER.info("Monitoring mode ENABLED — all battery/inverter commands will be blocked")
-        try:
-            await async_prepare_monitoring_handoff(self.hass, self._entry)
-        except Exception as err:
-            finish_monitoring_handoff(self.hass, self._entry)
-            _LOGGER.warning(
-                "Monitoring mode was not enabled because cleanup failed: %s",
-                err,
-            )
-            return
-
-        self._attr_is_on = True
-        new_options = {**self._entry.options}
-        new_options[CONF_MONITORING_MODE] = True
-        try:
-            self.hass.config_entries.async_update_entry(
-                self._entry,
-                options=new_options,
-            )
-        finally:
-            finish_monitoring_handoff(self.hass, self._entry)
-
-        self.async_write_ha_state()
-
-    async def async_turn_off(self, **kwargs: Any) -> None:
-        """Disable monitoring mode — resume normal battery/inverter control."""
-        if self._entry.options.get(
-            CONF_SUNGROW_CONNECTION_TYPE,
-            self._entry.data.get(
-                CONF_SUNGROW_CONNECTION_TYPE,
-                SUNGROW_CONNECTION_DIRECT,
-            ),
-        ) == SUNGROW_CONNECTION_IHOMEMANAGER:
-            _LOGGER.warning(
-                "Monitoring mode cannot be disabled for the telemetry-only "
-                "Sungrow iHomeManager connection"
-            )
-            self._attr_is_on = True
-            self.async_write_ha_state()
-            return
-        _LOGGER.info("Monitoring mode DISABLED — normal battery/inverter control resumed")
-        self._attr_is_on = False
-
-        new_options = {**self._entry.options}
-        new_options[CONF_MONITORING_MODE] = False
-        self.hass.config_entries.async_update_entry(
-            self._entry,
-            options=new_options,
-        )
-
-        self.async_write_ha_state()
-
-
-class AwayModeSwitch(SwitchEntity):
-    """Switch to activate away mode — makes the load forecaster use pre-vacation history."""
-
-    _attr_has_entity_name = True
-    _attr_entity_category = EntityCategory.CONFIG
-
-    def __init__(self, hass: HomeAssistant, entry: ConfigEntry, coordinator: Any) -> None:
-        """Initialize the switch."""
-        self.hass = hass
-        self._entry = entry
-        self._coordinator = coordinator
-        self._attr_unique_id = f"{entry.entry_id}_{SWITCH_TYPE_AWAY_MODE}"
-        self._attr_suggested_object_id = f"power_sync_{SWITCH_TYPE_AWAY_MODE}"
-        self._attr_name = "Away Mode"
-        self._attr_icon = "mdi:home-export-outline"
-        # Restore from persisted config entry options — switch is ON when
-        # away_enabled_at is set and away_disabled_at is not.
-        from .const import CONF_AWAY_ENABLED_AT, CONF_AWAY_DISABLED_AT
-        en = entry.options.get(CONF_AWAY_ENABLED_AT) or entry.data.get(CONF_AWAY_ENABLED_AT)
-        dis = entry.options.get(CONF_AWAY_DISABLED_AT) or entry.data.get(CONF_AWAY_DISABLED_AT)
-        self._attr_is_on = bool(en and not dis)
-
-    @property
-    def device_info(self):
-        return family_device_info(self._entry.entry_id, SENSOR_FAMILY_CONTROLS)
-
-    @property
-    def is_on(self) -> bool:
-        """Return True if away mode is active."""
-        return self._attr_is_on
-
-    async def async_turn_on(self, **kwargs: Any) -> None:
-        """Enable away mode."""
-        _LOGGER.info("Away mode ENABLED — load forecaster will use pre-vacation history")
-        self._attr_is_on = True
-        self._coordinator.set_away_mode(True)
-        self.async_write_ha_state()
-
-    async def async_turn_off(self, **kwargs: Any) -> None:
-        """Disable away mode."""
-        _LOGGER.info("Away mode DISABLED — load forecaster using recent history")
-        self._attr_is_on = False
-        self._coordinator.set_away_mode(False)
-        self.async_write_ha_state()
-
-
-class ProfitMaxModeSwitch(SwitchEntity):
-    """Switch to activate profit maximisation mode — drives the LP to export more aggressively."""
-
-    _attr_has_entity_name = True
-    _attr_entity_category = EntityCategory.CONFIG
-
-    def __init__(self, hass: HomeAssistant, entry: ConfigEntry, coordinator: Any) -> None:
-        """Initialize the switch."""
-        self.hass = hass
-        self._entry = entry
-        self._coordinator = coordinator
-        self._attr_unique_id = f"{entry.entry_id}_{SWITCH_TYPE_PROFIT_MAX_MODE}"
-        self._attr_suggested_object_id = f"power_sync_{SWITCH_TYPE_PROFIT_MAX_MODE}"
-        self._attr_name = "Profit Maximisation Mode"
-        self._attr_icon = "mdi:cash-plus"
-        from .const import CONF_PROFIT_MAX_ENABLED
-        enabled = entry.options.get(
-            CONF_PROFIT_MAX_ENABLED,
-            entry.data.get(CONF_PROFIT_MAX_ENABLED, False),
-        )
-        self._attr_is_on = bool(enabled)
-
-    async def async_added_to_hass(self) -> None:
-        """Register for optimizer setting changes made outside this switch."""
-        self.async_on_remove(
-            async_dispatcher_connect(
-                self.hass,
-                f"{DOMAIN}_{self._entry.entry_id}_profit_max_mode",
-                self._handle_profit_max_update,
-            )
-        )
-
-    @callback
-    def _handle_profit_max_update(self, enabled: bool) -> None:
-        """Update the HA switch state after API-driven changes."""
-        self._attr_is_on = bool(enabled)
-        self.async_write_ha_state()
-
-    @property
-    def device_info(self):
-        return family_device_info(self._entry.entry_id, SENSOR_FAMILY_LP_OPTIMIZER)
-
-    @property
-    def is_on(self) -> bool:
-        """Return True if profit maximisation mode is active."""
-        return self._coordinator.profit_max_mode
-
-    async def async_turn_on(self, **kwargs: Any) -> None:
-        """Enable profit maximisation mode."""
-        self._attr_is_on = True
-        changed = self._coordinator.set_profit_max_mode(True)
-        await _reoptimize_if_enabled(self._coordinator, changed)
-        self.async_write_ha_state()
-
-    async def async_turn_off(self, **kwargs: Any) -> None:
-        """Disable profit maximisation mode."""
-        self._attr_is_on = False
-        changed = self._coordinator.set_profit_max_mode(False)
-        await _reoptimize_if_enabled(self._coordinator, changed)
-        self.async_write_ha_state()
-
-
-class CostNeutralSwitch(SwitchEntity):
-    """Cap discretionary battery export once today's projected costs are covered."""
-
-    _attr_has_entity_name = True
-    _attr_entity_category = EntityCategory.CONFIG
-
-    def __init__(self, hass: HomeAssistant, entry: ConfigEntry, coordinator: Any) -> None:
-        self.hass = hass
-        self._entry = entry
-        self._coordinator = coordinator
-        self._attr_unique_id = f"{entry.entry_id}_{SWITCH_TYPE_COST_NEUTRAL}"
-        self._attr_suggested_object_id = f"power_sync_{SWITCH_TYPE_COST_NEUTRAL}"
-        self._attr_name = "Cost Neutral"
-        self._attr_icon = "mdi:scale-balance"
-
-    async def async_added_to_hass(self) -> None:
-        self.async_on_remove(
-            async_dispatcher_connect(
-                self.hass,
-                f"{DOMAIN}_{self._entry.entry_id}_cost_neutral",
-                self._handle_update,
-            )
-        )
-
-    @callback
-    def _handle_update(self, enabled: bool) -> None:
-        self.async_write_ha_state()
-
-    @property
-    def device_info(self):
-        return family_device_info(self._entry.entry_id, SENSOR_FAMILY_LP_OPTIMIZER)
-
-    @property
-    def is_on(self) -> bool:
-        return self._coordinator.cost_neutral_enabled
-
-    async def async_turn_on(self, **kwargs: Any) -> None:
-        changed = self._coordinator.set_cost_neutral_enabled(True)
-        await _reoptimize_if_enabled(self._coordinator, changed)
-        self.async_write_ha_state()
-
-    async def async_turn_off(self, **kwargs: Any) -> None:
-        changed = self._coordinator.set_cost_neutral_enabled(False)
-        await _reoptimize_if_enabled(self._coordinator, changed)
-        self.async_write_ha_state()
-
-
-class ChargeByTimeSwitch(SwitchEntity):
-    """Switch to enforce a target battery SOC by a configured time."""
-
-    _attr_has_entity_name = True
-    _attr_entity_category = EntityCategory.CONFIG
-
-    def __init__(self, hass: HomeAssistant, entry: ConfigEntry, coordinator: Any) -> None:
-        """Initialize the switch."""
-        self.hass = hass
-        self._entry = entry
-        self._coordinator = coordinator
-        self._attr_unique_id = f"{entry.entry_id}_{SWITCH_TYPE_CHARGE_BY_TIME}"
-        self._attr_suggested_object_id = f"power_sync_{SWITCH_TYPE_CHARGE_BY_TIME}"
-        self._attr_name = "Charge By Time"
-        self._attr_icon = "mdi:battery-clock"
-        from .const import CONF_CHARGE_BY_TIME_ENABLED, CONF_PROFIT_MAX_ENABLED
-        enabled = entry.options.get(
-            CONF_CHARGE_BY_TIME_ENABLED,
-            entry.data.get(
-                CONF_CHARGE_BY_TIME_ENABLED,
-                entry.options.get(
-                    CONF_PROFIT_MAX_ENABLED,
-                    entry.data.get(CONF_PROFIT_MAX_ENABLED, False),
-                ),
-            ),
-        )
-        self._attr_is_on = bool(enabled)
-
-    async def async_added_to_hass(self) -> None:
-        """Register for optimizer setting changes made outside this switch."""
-        self.async_on_remove(
-            async_dispatcher_connect(
-                self.hass,
-                f"{DOMAIN}_{self._entry.entry_id}_charge_by_time",
-                self._handle_charge_by_time_update,
-            )
-        )
-
-    @callback
-    def _handle_charge_by_time_update(self, enabled: bool) -> None:
-        """Update the HA switch state after API-driven changes."""
-        self._attr_is_on = bool(enabled)
-        self.async_write_ha_state()
-
-    @property
-    def device_info(self):
-        return family_device_info(self._entry.entry_id, SENSOR_FAMILY_LP_OPTIMIZER)
-
-    @property
-    def is_on(self) -> bool:
-        """Return True if charge-by-time mode is active."""
-        return self._coordinator.charge_by_time_enabled
-
-    async def async_turn_on(self, **kwargs: Any) -> None:
-        """Enable charge-by-time mode."""
-        self._attr_is_on = True
-        changed = self._coordinator.set_charge_by_time_enabled(True)
-        await _reoptimize_if_enabled(self._coordinator, changed)
-        self.async_write_ha_state()
-
-    async def async_turn_off(self, **kwargs: Any) -> None:
-        """Disable charge-by-time mode."""
-        self._attr_is_on = False
-        changed = self._coordinator.set_charge_by_time_enabled(False)
-        await _reoptimize_if_enabled(self._coordinator, changed)
-        self.async_write_ha_state()
-
-
-class DisableIdleModeSwitch(SwitchEntity):
-    """Switch to replace optimizer idle holds with self-consumption."""
-
-    _attr_has_entity_name = True
-    _attr_entity_category = EntityCategory.CONFIG
-
-    def __init__(self, hass: HomeAssistant, entry: ConfigEntry, coordinator: Any) -> None:
-        """Initialize the switch."""
-        self.hass = hass
-        self._entry = entry
-        self._coordinator = coordinator
-        self._attr_unique_id = f"{entry.entry_id}_{SWITCH_TYPE_OPTIMIZATION_DISABLE_IDLE}"
-        self._attr_suggested_object_id = (
-            f"power_sync_{SWITCH_TYPE_OPTIMIZATION_DISABLE_IDLE}"
-        )
-        self._attr_name = "No Idle Mode"
-        self._attr_icon = "mdi:sleep-off"
-        enabled = entry.options.get(
-            CONF_OPTIMIZATION_DISABLE_IDLE,
-            entry.data.get(CONF_OPTIMIZATION_DISABLE_IDLE, False),
-        )
-        self._attr_is_on = bool(enabled)
-
-    async def async_added_to_hass(self) -> None:
-        """Register for optimizer setting changes made outside this switch."""
-        self.async_on_remove(
-            async_dispatcher_connect(
-                self.hass,
-                f"{DOMAIN}_{self._entry.entry_id}_disable_idle",
-                self._handle_disable_idle_update,
-            )
-        )
-
-    @callback
-    def _handle_disable_idle_update(self, enabled: bool) -> None:
-        """Update the HA switch state after API-driven changes."""
-        self._attr_is_on = bool(enabled)
-        self.async_write_ha_state()
-
-    @property
-    def device_info(self):
-        return family_device_info(self._entry.entry_id, SENSOR_FAMILY_LP_OPTIMIZER)
-
-    @property
-    def is_on(self) -> bool:
-        """Return True if no-idle mode is active."""
-        return self._coordinator.disable_idle_enabled
-
-    async def async_turn_on(self, **kwargs: Any) -> None:
-        """Enable no-idle mode."""
-        self._attr_is_on = True
-        changed = self._coordinator.set_disable_idle_enabled(True)
-        await _reoptimize_if_enabled(self._coordinator, changed)
-        self.async_write_ha_state()
-
-    async def async_turn_off(self, **kwargs: Any) -> None:
-        """Disable no-idle mode."""
-        self._attr_is_on = False
-        changed = self._coordinator.set_disable_idle_enabled(False)
-        await _reoptimize_if_enabled(self._coordinator, changed)
-        self.async_write_ha_state()
-
-
-class SpreadExportSwitch(SwitchEntity):
-    """Switch to spread optimizer export across the full eligible window."""
-
-    _attr_has_entity_name = True
-    _attr_entity_category = EntityCategory.CONFIG
-
-    def __init__(self, hass: HomeAssistant, entry: ConfigEntry, coordinator: Any) -> None:
-        """Initialize the switch."""
-        self.hass = hass
-        self._entry = entry
-        self._coordinator = coordinator
-        self._attr_unique_id = f"{entry.entry_id}_{SWITCH_TYPE_OPTIMIZATION_SPREAD_EXPORT}"
-        self._attr_suggested_object_id = f"power_sync_{SWITCH_TYPE_OPTIMIZATION_SPREAD_EXPORT}"
-        self._attr_name = "Spread Export Across Window"
-        self._attr_icon = "mdi:timeline-clock-outline"
-        enabled = entry.options.get(
-            CONF_OPTIMIZATION_SPREAD_EXPORT_ENABLED,
-            entry.data.get(CONF_OPTIMIZATION_SPREAD_EXPORT_ENABLED, False),
-        )
-        self._attr_is_on = bool(enabled)
-
-    async def async_added_to_hass(self) -> None:
-        """Register for optimizer setting changes made outside this switch."""
-        self.async_on_remove(
-            async_dispatcher_connect(
-                self.hass,
-                f"{DOMAIN}_{self._entry.entry_id}_spread_export",
-                self._handle_spread_export_update,
-            )
-        )
-
-    @callback
-    def _handle_spread_export_update(self, enabled: bool) -> None:
-        """Update the HA switch state after API-driven changes."""
-        self._attr_is_on = bool(enabled)
-        self.async_write_ha_state()
-
-    @property
-    def device_info(self):
-        return family_device_info(self._entry.entry_id, SENSOR_FAMILY_LP_OPTIMIZER)
-
-    @property
-    def is_on(self) -> bool:
-        """Return True if spread export mode is active."""
-        return self._coordinator.spread_export_enabled
-
-    async def async_turn_on(self, **kwargs: Any) -> None:
-        """Enable spread export mode."""
-        self._attr_is_on = True
-        changed = self._coordinator.set_spread_export_enabled(True)
-        await _reoptimize_if_enabled(self._coordinator, changed)
-        self.async_write_ha_state()
-
-    async def async_turn_off(self, **kwargs: Any) -> None:
-        """Disable spread export mode."""
-        self._attr_is_on = False
-        changed = self._coordinator.set_spread_export_enabled(False)
-        await _reoptimize_if_enabled(self._coordinator, changed)
-        self.async_write_ha_state()
-
-
-class SpreadImportSwitch(SwitchEntity):
-    """Switch to spread optimizer import charge across same-price windows."""
-
-    _attr_has_entity_name = True
-    _attr_entity_category = EntityCategory.CONFIG
-
-    def __init__(self, hass: HomeAssistant, entry: ConfigEntry, coordinator: Any) -> None:
-        """Initialize the switch."""
-        self.hass = hass
-        self._entry = entry
-        self._coordinator = coordinator
-        self._attr_unique_id = f"{entry.entry_id}_{SWITCH_TYPE_OPTIMIZATION_SPREAD_IMPORT}"
-        self._attr_suggested_object_id = f"power_sync_{SWITCH_TYPE_OPTIMIZATION_SPREAD_IMPORT}"
-        self._attr_name = "Spread Import Across Window"
-        self._attr_icon = "mdi:timeline-clock"
-        enabled = entry.options.get(
-            CONF_OPTIMIZATION_SPREAD_IMPORT_ENABLED,
-            entry.data.get(CONF_OPTIMIZATION_SPREAD_IMPORT_ENABLED, False),
-        )
-        self._attr_is_on = bool(enabled)
-
-    async def async_added_to_hass(self) -> None:
-        """Register for optimizer setting changes made outside this switch."""
-        self.async_on_remove(
-            async_dispatcher_connect(
-                self.hass,
-                f"{DOMAIN}_{self._entry.entry_id}_spread_import",
-                self._handle_spread_import_update,
-            )
-        )
-
-    @callback
-    def _handle_spread_import_update(self, enabled: bool) -> None:
-        """Update the HA switch state after API-driven changes."""
-        self._attr_is_on = bool(enabled)
-        self.async_write_ha_state()
-
-    @property
-    def device_info(self):
-        return family_device_info(self._entry.entry_id, SENSOR_FAMILY_LP_OPTIMIZER)
-
-    @property
-    def is_on(self) -> bool:
-        """Return True if spread import mode is active."""
-        return self._coordinator.spread_import_enabled
-
-    async def async_turn_on(self, **kwargs: Any) -> None:
-        """Enable spread import mode."""
-        self._attr_is_on = True
-        changed = self._coordinator.set_spread_import_enabled(True)
-        await _reoptimize_if_enabled(self._coordinator, changed)
-        self.async_write_ha_state()
-
-    async def async_turn_off(self, **kwargs: Any) -> None:
-        """Disable spread import mode."""
-        self._attr_is_on = False
-        changed = self._coordinator.set_spread_import_enabled(False)
-        await _reoptimize_if_enabled(self._coordinator, changed)
-        self.async_write_ha_state()
-
-
 class _TeslaSiteSwitchBase(SwitchEntity):
     """Base for Tesla Energy Site switches that call coordinator methods."""
 
     _attr_has_entity_name = True
     _attr_should_poll = True
 
-    def __init__(self, hass: HomeAssistant, entry: ConfigEntry, key: str, name: str, icon: str) -> None:
+    def __init__(
+        self, hass: HomeAssistant, entry: ConfigEntry, key: str, name: str, icon: str
+    ) -> None:
         self.hass = hass
         self._entry = entry
         self._attr_unique_id = f"{entry.entry_id}_{key}"
-        self._attr_suggested_object_id = f"power_sync_{key}"
+        self._attr_suggested_object_id = f"tesla_v1r_{key}"
         self._attr_name = name
         self._attr_icon = icon
         self._attr_is_on: bool | None = None
@@ -1687,7 +828,11 @@ class _TeslaSiteSwitchBase(SwitchEntity):
         return family_device_info(self._entry.entry_id, SENSOR_FAMILY_BATTERY)
 
     def _tesla_coord(self):
-        return self.hass.data.get(DOMAIN, {}).get(self._entry.entry_id, {}).get("tesla_coordinator")
+        return (
+            self.hass.data.get(DOMAIN, {})
+            .get(self._entry.entry_id, {})
+            .get("tesla_coordinator")
+        )
 
     async def async_update(self) -> None:
         """Refresh Tesla site_info often enough for controls changed elsewhere."""
@@ -1710,7 +855,8 @@ class GridChargingSwitch(_TeslaSiteSwitchBase):
 
     def __init__(self, hass: HomeAssistant, entry: ConfigEntry) -> None:
         super().__init__(
-            hass, entry,
+            hass,
+            entry,
             key="tesla_grid_charging",
             name="Grid Charging",
             icon="mdi:transmission-tower-import",
@@ -1763,7 +909,8 @@ class StormWatchSwitch(_TeslaSiteSwitchBase):
 
     def __init__(self, hass: HomeAssistant, entry: ConfigEntry) -> None:
         super().__init__(
-            hass, entry,
+            hass,
+            entry,
             key="tesla_storm_watch",
             name="Storm Watch",
             icon="mdi:weather-lightning",
@@ -1807,7 +954,8 @@ class VppProgramSwitch(_TeslaSiteSwitchBase):
         safe_key = "".join(c if c.isalnum() else "_" for c in pid_str.lower())
         display_name = program.get("display_name") or program.get("name") or pid_str
         super().__init__(
-            hass, entry,
+            hass,
+            entry,
             key=f"tesla_vpp_{safe_key}",
             name=f"VPP: {display_name}",
             icon="mdi:transmission-tower",
@@ -1821,7 +969,10 @@ class VppProgramSwitch(_TeslaSiteSwitchBase):
             return self._program
         programs = getattr(coord, "_vpp_programs_cache", None) or []
         for p in programs:
-            if str(p.get("id") or p.get("program_id") or p.get("name")) == self._program_id:
+            if (
+                str(p.get("id") or p.get("program_id") or p.get("name"))
+                == self._program_id
+            ):
                 return p
         return self._program
 
@@ -1848,14 +999,16 @@ class VppProgramSwitch(_TeslaSiteSwitchBase):
 
     async def async_turn_on(self, **kwargs: Any) -> None:
         await self.hass.services.async_call(
-            DOMAIN, "set_vpp_enrollment",
+            DOMAIN,
+            "set_vpp_enrollment",
             {"program_id": self._program_id, "enrolled": True, "source": "user"},
             blocking=False,
         )
 
     async def async_turn_off(self, **kwargs: Any) -> None:
         await self.hass.services.async_call(
-            DOMAIN, "set_vpp_enrollment",
+            DOMAIN,
+            "set_vpp_enrollment",
             {"program_id": self._program_id, "enrolled": False, "source": "user"},
             blocking=False,
         )
@@ -1880,7 +1033,7 @@ class _PowerwallGridModeSwitch(SwitchEntity):
         self.hass = hass
         self._entry = entry
         self._attr_unique_id = f"{entry.entry_id}_{key}"
-        self._attr_suggested_object_id = f"power_sync_{key}"
+        self._attr_suggested_object_id = f"tesla_v1r_{key}"
         self._attr_name = name
         self._attr_icon = icon
         self._mode_is_off_grid = mode_is_off_grid
@@ -1890,7 +1043,9 @@ class _PowerwallGridModeSwitch(SwitchEntity):
         return family_device_info(self._entry.entry_id, SENSOR_FAMILY_BATTERY)
 
     def _entry_data(self) -> dict[str, Any]:
-        return self.hass.data.setdefault(DOMAIN, {}).setdefault(self._entry.entry_id, {})
+        return self.hass.data.setdefault(DOMAIN, {}).setdefault(
+            self._entry.entry_id, {}
+        )
 
     def _current_is_off_grid(self) -> bool | None:
         """Return actual islanding state from local data, falling back to cloud."""
@@ -1902,7 +1057,7 @@ class _PowerwallGridModeSwitch(SwitchEntity):
                 return _grid_status_is_off_grid(getattr(snap, "grid_status", None))
 
         # Fall back to cloud grid_status sensor
-        state = self.hass.states.get("sensor.power_sync_grid_status")
+        state = self.hass.states.get("sensor.tesla_v1r_grid_status")
         return _grid_status_is_off_grid(getattr(state, "state", None))
 
     def _pending_state(self) -> tuple[bool | None, datetime | None]:
