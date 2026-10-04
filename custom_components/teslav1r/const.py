@@ -23,6 +23,16 @@ TESLA_V1R_USER_AGENT = f"Teslav1r/{TESLA_V1R_VERSION} HomeAssistant"
 # held at wrap-up for minutes when an API cannot publish initial state.
 TESLA_CAPABILITY_WAIT_SECONDS = 30.0
 
+# Attributes
+ATTR_LAST_SYNC = "last_sync"
+ATTR_SYNC_STATUS = "sync_status"
+ATTR_PRICE_SPIKE = "price_spike"
+ATTR_WHOLESALE_PRICE = "wholesale_price"
+ATTR_NETWORK_PRICE = "network_price"
+ATTR_AEMO_REGION = "aemo_region"
+ATTR_AEMO_THRESHOLD = "aemo_threshold"
+ATTR_SPIKE_START_TIME = "spike_start_time"
+
 # Configuration keys
 CONF_TESLA_FORCE_DISCHARGE_BUY_PRICE = "tesla_force_discharge_buy_price"
 CONF_TESLA_FORCE_DISCHARGE_SELL_PRICE = "tesla_force_discharge_sell_price"
