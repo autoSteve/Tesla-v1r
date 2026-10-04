@@ -299,6 +299,22 @@ SENSOR_TYPE_BACKUP_TIME_REMAINING = "backup_time_remaining"
 SENSOR_TYPE_TOTAL_PACK_ENERGY = "total_pack_energy"
 SENSOR_TYPE_ENERGY_LEFT = "energy_left"
 SENSOR_TYPE_GRID_SERVICES_POWER = "grid_services_power"
+SENSOR_TYPE_DAILY_IMPORT_COST = "daily_import_cost"
+SENSOR_TYPE_DAILY_EXPORT_EARNINGS = "daily_export_earnings"
+SENSOR_TYPE_DAILY_AVG_COST_PER_KWH = "daily_avg_cost_per_kwh"
+SENSOR_TYPE_MTD_AVG_COST_PER_KWH = "mtd_avg_cost_per_kwh"
+
+# Demand charge sensors
+SENSOR_TYPE_GRID_IMPORT_POWER = "grid_import_power"
+SENSOR_TYPE_IN_DEMAND_CHARGE_PERIOD = "in_demand_charge_period"
+SENSOR_TYPE_PEAK_DEMAND_THIS_CYCLE = "peak_demand_this_cycle"
+SENSOR_TYPE_DEMAND_CHARGE_COST = "demand_charge_cost"
+SENSOR_TYPE_DAYS_UNTIL_DEMAND_RESET = "days_until_demand_reset"
+
+# Supply charge sensors
+SENSOR_TYPE_DAILY_SUPPLY_CHARGE_COST = "daily_supply_charge_cost"
+SENSOR_TYPE_MONTHLY_SUPPLY_CHARGE = "monthly_supply_charge"
+SENSOR_TYPE_TOTAL_MONTHLY_COST = "total_monthly_cost"
 
 # Tesla Powerwall local TEDAPI sensors (gated on CONF_POWERWALL_LOCAL_PAIRED)
 SENSOR_TYPE_PW_SYSTEM_ISLAND_STATE = "pw_system_island_state"
